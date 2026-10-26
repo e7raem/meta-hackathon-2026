@@ -1,0 +1,84 @@
+version: 1
+
+project:
+  name: meta-change-reviewer-slice-1
+  description: Seeded checkout change review with a static maintainer-projection evidence card.
+
+metadata:
+  ota:
+    minimum_version: "1.6.28"
+
+execution:
+  preferred: native
+  supported:
+    - native
+
+tasks:
+  "verify:shallow":
+    description: Run the original all-eligible smoke checks.
+    command:
+      exe: node
+      args:
+        - checks/shallow.ts
+
+  "verify:semantic":
+    description: Run the frozen accepted semantic checker against the current source.
+    command:
+      exe: node
+      args:
+        - checks/semantic.ts
+
+  "verify:report":
+    description: Test the static evidence renderer using isolated fixture-owned evidence paths.
+    command:
+      exe: node
+      args:
+        - --test
+        - checks/report.test.mjs
+    effects:
+      writes:
+        - evidence/
+
+  "report:render":
+    description: Render only evidence/review.json to the static evidence/report.html card.
+    command:
+      exe: node
+      args:
+        - tools/report.mjs
+    effects:
+      writes:
+        - evidence/
+
+  "demo:excluded":
+    description: Harmless marker-writing task excluded from agent admission.
+    command:
+      exe: node
+      args:
+        - --input-type=commonjs
+        - -e
+        - >-
+          const fs = require("node:fs");
+          fs.mkdirSync(".demo-scratch", { recursive: true });
+          fs.writeFileSync(".demo-scratch/excluded.marker", "excluded demo task\n");
+    effects:
+      writes:
+        - .demo-scratch/
+
+agent:
+  entrypoint: verify:semantic
+  default_task: verify:semantic
+  safe_tasks:
+    - verify:shallow
+    - verify:semantic
+    - verify:report
+    - report:render
+  verify_after_changes:
+    - verify:semantic
+  writable_paths:
+    - src/
+    - evidence/
+  protected_paths:
+    - ota.yaml
+    - checks/
+    - fixtures/
+    - tools/report.mjs
