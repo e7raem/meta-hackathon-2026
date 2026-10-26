@@ -63,13 +63,13 @@ function projection(origin = "fixture") {
 function assertUnknown(input) {
   const html = renderReport(input);
   assert.match(html, /class="state unknown">UNKNOWN/);
-  assert.doesNotMatch(html, /class="pass"|class="fail"|BOUNDED LOOP REPORTED OBSERVED/);
+  assert.doesNotMatch(html, /class="pass"|class="fail"|RECORDED RUN/);
 }
 
 test("valid observed projection is explicitly supplied, not independently verified", () => {
   const input = projection("observed");
   const html = renderReport(input);
-  assert.match(html, /BOUNDED LOOP REPORTED OBSERVED/);
+  assert.match(html, /RECORDED RUN/);
   assert.match(html, /does not independently verify/);
   assert.match(html, /Bobai: accepted all three/);
   assert.match(html, /Bobai did not review that exact repair patch/);
@@ -81,7 +81,9 @@ test("valid observed projection is explicitly supplied, not independently verifi
   assert.match(html, /FAIL 9000/);
   assert.match(html, /FAIL 10800/);
   assert.match(html, /FAIL 7200/);
-  assert.match(html, /GBP 110\.00.*GBP 108\.00/);
+  assert.match(html, /Expected<strong>£110\.00/);
+  assert.match(html, /Before<strong class="fail">£108\.00/);
+  assert.match(html, /After<strong class="pass">£110\.00/);
   assert.match(html, /Semantic exits: GOOD 0; BAD 1;/);
   assert.match(html, /Shallow exits: GOOD 0; BAD 0;/);
   assert.match(html, /Execution-time contract/);
@@ -101,7 +103,8 @@ test("complete fixture remains synthetic, incomplete fixture is UNKNOWN", () => 
   assert.match(html, /FIXTURE ONLY/);
   assert.match(html, /not actual Meta evidence/);
   assert.match(html, /not live Meta calls or actual execution evidence/);
-  assert.doesNotMatch(html, /BOUNDED LOOP REPORTED OBSERVED/);
+  assert.doesNotMatch(html, /RECORDED RUN/);
+  assert.match(html, /Mixed-basket display: <strong>UNKNOWN/);
   assertUnknown({ version: 1, origin: "fixture" });
   assert.match(renderReport({ version: 1, origin: "fixture" }), /FIXTURE/);
 });
@@ -250,7 +253,7 @@ test("fixed CLI writes valid observed and fixture reports, not on import", async
       const result = invoke(directory);
       assert.equal(result.status, 0, result.stderr);
       const html = await readFile(resolve(directory, "evidence/report.html"), "utf8");
-      assert.match(html, origin === "fixture" ? /FIXTURE ONLY/ : /BOUNDED LOOP REPORTED OBSERVED/);
+      assert.match(html, origin === "fixture" ? /FIXTURE ONLY/ : /RECORDED RUN/);
       assert.deepEqual((await readdir(resolve(directory, "evidence"))).sort(), ["report.html", "review.json"]);
     }
   });
@@ -274,7 +277,7 @@ test("fixed CLI writes UNKNOWN and nonzero for missing, malformed, invalid and o
       assert.match(result.stderr, /UNKNOWN/);
       const html = await readFile(resolve(directory, "evidence/report.html"), "utf8");
       assert.match(html, />UNKNOWN</);
-      assert.doesNotMatch(html, /class="pass"|BOUNDED LOOP REPORTED OBSERVED/);
+      assert.doesNotMatch(html, /class="pass"|RECORDED RUN/);
     }
     await writeFile(
       resolve(directory, "evidence/review.json"),
@@ -299,4 +302,27 @@ test("fixed CLI rejects linked and nonregular projection inputs", async () => {
     assert.equal(invoke(directory).status, 1);
     assert.match(await readFile(resolve(directory, "evidence/report.html"), "utf8"), />UNKNOWN</);
   });
+});
+
+test("money summary derives only from a valid observed mixed-basket record", () => {
+  const input = projection("observed");
+  input.semantic.cases[1].lines[1].amount = 1000;
+  input.semantic.cases[1].expected = 10000;
+  input.semantic.good.actual[1] = 10000;
+  input.semantic.bad.actual[1] = 9900;
+  input.semantic.repaired.actual[1] = 10000;
+  const html = renderReport(input);
+  assert.match(html, /Expected<strong>£100\.00/);
+  assert.match(html, /Before<strong class="fail">£99\.00/);
+  assert.match(html, /After<strong class="pass">£100\.00/);
+  assert.doesNotMatch(html, /£110\.00|£108\.00/);
+  input.semantic.good.actual[1] = 11000;
+  assertUnknown(input);
+  const noMixed = projection("observed");
+  noMixed.semantic.cases[1].lines[0].discountEligible = false;
+  noMixed.semantic.cases[1].expected = 12000;
+  noMixed.semantic.good.actual[1] = 12000;
+  noMixed.semantic.repaired.actual[1] = 12000;
+  assert.match(renderReport(noMixed), /Mixed-basket display: <strong>UNKNOWN/);
+  assert.doesNotMatch(renderReport(noMixed), /£110\.00|£108\.00/);
 });

@@ -45,10 +45,12 @@ source-authoring turn. The author-provided `fixtures/checkout-fix.fixture.patch`
 is a separate labelled FIXTURE reference, not that real Meta repair.
 
 Maintainer validation on macOS with released Ota v1.6.28 and Node v24.22.1 passed
-all **9 renderer tests**, contract validation and both renderer-task dry-run previews.
+all **10 renderer tests**, contract validation and both renderer-task dry-run previews.
 The declared render task also returned zero and generated a local static card from
 the allowlisted observed-result projection. Tests cover invalid/missing/oversized
-input, linked/nonregular input, contradictory results and HTML injection. These
+input, linked/nonregular input, contradictory results, HTML injection and derived
+observed-only money display. The presentation follow-up reran the affected renderer
+tests and actual render successfully; the earlier validation remains separate. These
 are local selected-path results, not hosted CI or independent evidence attestation.
 Generated outputs and raw provider responses are deliberately not committed.
 

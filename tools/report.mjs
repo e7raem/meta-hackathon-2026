@@ -160,6 +160,11 @@ h2 { margin-top: 2.3rem; border-top: 1px solid #d9d3c5; padding-top: 1.2rem; }
 .state { display: inline-block; padding: .3rem .7rem; border: 1px solid currentColor; }
 .pass { color: #245934; } .fail { color: #9b3028; } .unknown { color: #765500; }
 .note { padding: 1rem; background: #f3efe6; border-left: 3px solid #9b917d; }
+.lead { max-width: 44rem; font-size: 1.15rem; }
+.boundary, .domain { color: #625e52; font-size: .9rem; }
+.amount-summary { margin: 1.8rem 0; padding: 1.4rem; border: 1px solid #d9d3c5; background: linear-gradient(135deg, #f7f3e9, #edf3eb); }
+.amounts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+.amounts p { margin: 0; } .amounts strong { display: block; font-size: clamp(1.8rem, 4vw, 2.8rem); line-height: 1.3; font-weight: normal; }
 .scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; margin: 1rem 0; text-align: left; }
 th, td { padding: .7rem; vertical-align: top; border-bottom: 1px solid #ded8cc; }
@@ -168,7 +173,7 @@ pre { white-space: pre-wrap; padding: 1rem; background: #f3efe6; font-size: .85r
 dd { margin: .3rem 0 1rem; font-size: .85rem; } dt { margin-top: .8rem; }
 details { margin-top: 1.5rem; } summary { cursor: pointer; }
 footer { margin-top: 2rem; font-size: .9rem; color: #625e52; }
-@media (max-width: 40rem) { body { padding: .5rem; } th, td { padding: .5rem; } }
+@media (max-width: 40rem) { body { padding: .5rem; } th, td { padding: .5rem; } .amounts { grid-template-columns: 1fr; } .amounts p { display: flex; align-items: baseline; justify-content: space-between; gap: .6rem; } }
 `;
 
 function document(body) {
@@ -190,6 +195,17 @@ This renderer does not independently verify execution or hashes.</p>`);
 
 function renderValid(input) {
   const fixture = input.origin === "fixture";
+  const mixedIndex = input.semantic.cases.findIndex((testCase) =>
+    testCase.lines.some((line) => line.discountEligible)
+      && testCase.lines.some((line) => !line.discountEligible));
+  const money = (value) => `£${(value / 100).toFixed(2)}`;
+  const amounts = !fixture && mixedIndex >= 0
+    ? `<section class="amount-summary" aria-label="Recorded mixed basket">
+<div class="amounts"><p>Expected<strong>${money(input.semantic.cases[mixedIndex].expected)}</strong></p>
+<p>Before<strong class="fail">${money(input.semantic.bad.actual[mixedIndex])}</strong></p>
+<p>After<strong class="pass">${money(input.semantic.repaired.actual[mixedIndex])}</strong></p></div>
+<p class="boundary">Recorded mixed-eligibility case, shown as a GBP illustration (100 minor units per pound), not a payment.</p></section>`
+    : `<section class="amount-summary"><p>Mixed-basket display: <strong>UNKNOWN</strong> — no observed mixed-basket record supplied.</p></section>`;
   const rows = input.semantic.cases.map((testCase, index) => {
     const lines = testCase.lines.map((line) =>
       `${line.amount} (${line.discountEligible ? "eligible" : "ineligible"})`).join(" + ");
@@ -213,27 +229,17 @@ function renderValid(input) {
     ...variants.map((variant) => [`${variant.toUpperCase()} source`, input.semantic[variant].sourceSha256]),
   ].map(([label, value]) => `<dt>${escape(label)}</dt><dd>${escape(value)}</dd>`).join("");
   return document(`<header><p class="eyebrow">SEEDED / ${fixture ? "FIXTURE — synthetic, not actual Meta evidence" : "Maintainer-supplied observed projection"}</p>
-<h1>A green refactor.<br>An uncovered rule.</h1>
-<p class="state">${fixture ? "FIXTURE ONLY" : "BOUNDED LOOP REPORTED OBSERVED"}</p></header>
-<p class="note">${fixture
+<h1>Green checks.<br>Wrong result.</h1>
+<p class="state">${fixture ? "FIXTURE ONLY" : "RECORDED RUN"}</p></header>
+<p class="lead">${fixture ? "Synthetic illustration of green checks, a missed rule and a repaired result; not actual model or execution evidence." : "All-eligible checks stayed green. Meta proposed the missing questions; the accepted checks exposed the regression and passed the repair."}</p>
+<p class="boundary">${fixture
     ? "All states below belong to a synthetic test fixture, not live Meta calls or actual execution evidence."
-    : "The maintainer reports the bounded loop was observed. This card projects supplied records; it does not independently verify execution, model provenance, or any hash."}</p>
-<h2>The rule and the change</h2>
-<p>Discount eligible lines by 10%, leave ineligible lines unchanged, then sum.</p>
-<p>1–4 lines; integer amounts 100..100000 minor units, multiples of 100; explicit boolean eligibility.
-No mutation, tax, caps, rounding, or real payments.</p>
-<p><strong>Supplied rule:</strong> ${escape(input.scenario.rule)}</p>
-<p><strong>Supplied domain:</strong> ${escape(input.scenario.domain)}</p>
-<p>The seeded candidate discounts the entire basket; the baseline and repair discount eligible lines only.
-The source candidate deliberately remains BAD; repair execution was in a separate retained copy.</p>
-<p><strong>Labelled illustration:</strong> eligible 10000 + ineligible 2000 minor units:
-GBP 110.00 required versus GBP 108.00 under the seeded refactor. This illustration is not an additional run.</p>
-<h2>Case proposal and human acceptance</h2>
-<p>${fixture ? "Synthetic request records" : "Reported Meta request records"}: two requests, one repair proposal.</p><ol>${requests}</ol>
-<p>Bobai: accepted all three proposed cases. SCOOBY/MUSE: technical review of the repair.
-Bobai did not review that exact repair patch. Case acceptance is not patch approval.
-${fixture ? "These role statements are fixture-labelled, not evidence of actual human actions." : "These role labels describe the supplied historical handoff, not an identity attestation."}</p>
-<h2>Original green checks versus uncovered failure</h2>
+    : "Seeded example. Maintainer-supplied projection; it does not independently verify execution, model provenance, or any hash."}</p>
+${amounts}
+<h2>The rule</h2><p>${escape(input.scenario.rule)}</p>
+<p class="domain">${escape(input.scenario.domain)}</p>
+<h2>Three accepted questions</h2>
+<p>${fixture ? "Fixture-labelled proposal and acceptance records, not actual human actions." : "Meta proposed the cases; Bobai accepted all three."} GOOD and the reviewed repair pass; the intentionally BAD candidate fails.</p>
 <div class="scroll"><table><thead><tr><th>Case / minor units</th><th>Expected</th><th>GOOD</th><th>BAD</th><th>REPAIRED</th></tr></thead>
 <tbody>${rows}</tbody></table></div>
 <p>Semantic exits: GOOD ${input.semantic.good.exitCode}; BAD ${input.semantic.bad.exitCode};
@@ -243,15 +249,21 @@ REPAIRED ${input.semantic.repaired.exitCode}. The intentional BAD FAIL is preser
 <p>Shallow exits: GOOD ${input.shallow.good.exitCode}; BAD ${input.shallow.bad.exitCode};
 REPAIRED ${input.shallow.repaired.exitCode}. All-eligible coverage did not distinguish the refactor.</p>
 <details><summary>Changed expression / supplied diff</summary><pre>${escape(input.scenario.diff)}</pre></details>
+<details><summary>Model calls and review roles</summary>
+<p>${fixture ? "Synthetic request records" : "Reported Meta request records"}: two requests, one repair proposal.</p><ol>${requests}</ol>
+<p>Bobai: accepted all three proposed cases. SCOOBY/MUSE: technical review of the repair.
+Bobai did not review that exact repair patch. Case acceptance is not patch approval.
+${fixture ? "These role statements are fixture-labelled, not evidence of actual human actions." : "These role labels describe the supplied historical handoff, not an identity attestation."}</p>
+<p>The source candidate deliberately remains BAD; repair execution was in a separate retained copy.</p></details>
 <details><summary>Identities and supporting execution control</summary>
 <p>Adding renderer tasks changes CURRENT <code>ota.yaml</code>. Past model-loop runs bind the execution-time
 contract, not the renderer contract. Both identities are supplied, not recomputed or attested here.</p>
 <dl>${identities}</dl>
 <p>Supporting refusal: ${escape(input.supportingRefusal.reason)}; exit ${input.supportingRefusal.exitCode};
 marker reported absent. This supports only the selected task-admission control; Ota stays backstage.</p></details>
-<h2>Honest limits</h2><ul>${input.limits.map((limit) => `<li>${escape(limit)}</li>`).join("")}</ul>
+<details><summary>Scope and limits</summary><ul>${input.limits.map((limit) => `<li>${escape(limit)}</li>`).join("")}</ul>
 <p>Selected seeded examples only, not every basket, production payment safety, merge enforcement,
-full agent containment, customer savings, or model superiority. No independent hash verification or attestation.</p>
+full agent containment, customer savings, or model superiority. No independent hash verification or attestation.</p></details>
 <footer>Read-only local evidence projection. No live services, actions, scripts, or remote assets.</footer>`);
 }
 
