@@ -1,5 +1,7 @@
 /* Pricing change reviewer — warm editorial styling. Local assets only. */
 
+[hidden] { display: none !important; }
+
 :root {
   --paper: #f4efe3;
   --card: #fdfaf2;
