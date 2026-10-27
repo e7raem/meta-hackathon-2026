@@ -1,0 +1,501 @@
+/* Break This PR — warm editorial styling. Local assets only. */
+
+[hidden] { display: none !important; }
+
+:root {
+  --paper: #f4efe3;
+  --card: #fdfaf2;
+  --ink: #272418;
+  --muted: #6b6354;
+  --line: #d8d0bd;
+  --green: #2a6b3f;
+  --green-wash: #e8f0e6;
+  --amber: #8a6400;
+  --amber-wash: #f6edd6;
+  --red: #9b3028;
+  --red-wash: #f5e3e0;
+  --serif: Georgia, "Iowan Old Style", "Times New Roman", serif;
+  --mono: ui-monospace, "SF Mono", Menlo, "Courier New", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  line-height: 1.55;
+}
+
+#app {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 4rem;
+}
+
+.masthead {
+  border-bottom: 3px double var(--line);
+  padding-bottom: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.kicker {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 0.5rem;
+}
+
+h1 {
+  font-size: 2rem;
+  line-height: 1.2;
+  margin: 0 0 0.75rem;
+  font-weight: 700;
+}
+
+h2 {
+  font-size: 1.25rem;
+  margin: 0 0 0.35rem;
+}
+
+h3 {
+  font-size: 1.05rem;
+  margin: 1rem 0 0.35rem;
+}
+
+.lede {
+  font-size: 1.05rem;
+  color: var(--muted);
+  margin: 0 0 1rem;
+}
+
+.session-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.session-meta {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.badge {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--muted);
+}
+
+.badge.live {
+  border-color: var(--green);
+  background: var(--green-wash);
+  color: var(--green);
+}
+
+.badge.fixture {
+  border-color: var(--amber);
+  background: var(--amber-wash);
+  color: var(--amber);
+}
+
+.badge.offline {
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+.badge.edited {
+  border-color: var(--amber);
+  background: var(--amber-wash);
+  color: var(--amber);
+}
+
+.badge.meta {
+  border-color: var(--line);
+  background: var(--card);
+  color: var(--muted);
+}
+
+.journey {
+  list-style: none;
+  counter-reset: step;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1.5rem;
+}
+
+.step {
+  min-width: 0;
+  counter-increment: step;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.5rem 1.5rem 1.5rem 3.6rem;
+  position: relative;
+}
+
+.step::before {
+  content: counter(step);
+  position: absolute;
+  left: 1.1rem;
+  top: 1.45rem;
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+.step-hint {
+  color: var(--muted);
+  font-size: 0.92rem;
+  margin: 0 0 1rem;
+}
+
+button {
+  font-family: var(--serif);
+  font-size: 0.95rem;
+  padding: 0.5rem 1.1rem;
+  border-radius: 7px;
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+  cursor: pointer;
+}
+
+button:disabled {
+  border-color: var(--line);
+  background: var(--paper);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+button:focus-visible,
+input:focus-visible,
+summary:focus-visible {
+  outline: 3px solid var(--amber);
+  outline-offset: 2px;
+}
+
+.status {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  margin: 0.75rem 0 0;
+  min-height: 1.1em;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.status.good { color: var(--green); }
+.status.warn { color: var(--amber); }
+.status.bad,
+.status.error { color: var(--red); }
+.status.pending { color: var(--muted); font-style: italic; }
+
+.panel {
+  margin-top: 1rem;
+}
+
+.change-detail .pr-title {
+  margin-top: 0;
+}
+
+.pr-title {
+  font-style: italic;
+  color: var(--muted);
+  font-weight: 400;
+  margin: 0 0 0.6rem;
+}
+
+.coverage-list {
+  margin: 0.6rem 0 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.45rem;
+  font-size: 0.9rem;
+}
+
+.log {
+  max-height: 14rem;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+details {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0.6rem 0.9rem;
+  margin: 0.6rem 0;
+  background: var(--paper);
+}
+
+summary {
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.rule-text {
+  margin: 0.6rem 0 0.3rem;
+}
+
+.rule-domain {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 0;
+}
+
+pre {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0.75rem;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+
+.case-list {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.9rem;
+}
+
+.case-lines {
+  margin: 0;
+}
+
+.case-expected {
+  margin: 0.15rem 0;
+  font-weight: 700;
+}
+
+.case-rationale {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.expectation-rows {
+  display: grid;
+  gap: 0.9rem;
+  margin-bottom: 1rem;
+}
+
+.exp-row {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.exp-row label {
+  font-size: 0.92rem;
+}
+
+.exp-row input {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--paper);
+  color: var(--ink);
+  max-width: 10rem;
+}
+
+.exp-row .hint {
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  color: var(--red);
+}
+
+.review-confirm {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+}
+
+.accepted-list {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.45rem;
+  font-size: 0.92rem;
+}
+
+.fineprint {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 0.6rem 0;
+  overflow-wrap: anywhere;
+}
+
+.compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.compare-table th,
+.compare-table td {
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  padding: 0.45rem 0.6rem;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.compare-table th {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.compare-table td.good {
+  color: var(--green);
+  background: var(--green-wash);
+}
+
+.compare-table td.bad {
+  color: var(--red);
+  background: var(--red-wash);
+}
+
+.identities {
+  margin: 0.6rem 0;
+  font-size: 0.8rem;
+}
+
+.identities dt {
+  font-family: var(--mono);
+  color: var(--muted);
+  margin-top: 0.4rem;
+}
+
+.identities dd {
+  font-family: var(--mono);
+  margin: 0.1rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.limits {
+  margin: 0.6rem 0 0;
+  padding-left: 1.2rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.test-source {
+  max-height: 24rem;
+  overflow: auto;
+}
+
+.download {
+  margin: 0.4rem 0 0.8rem;
+}
+
+.endnote {
+  margin-top: 2.5rem;
+  border-top: 3px double var(--line);
+  padding-top: 1.25rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.retained-banner {
+  margin: 0.8rem 0 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--line);
+  background: var(--amber-wash);
+  color: var(--amber);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+}
+
+.charge-line {
+  margin: 0.3rem 0 0;
+  font-size: 0.85rem;
+}
+
+.charge-line .good { color: var(--green); }
+.charge-line .warn { color: var(--amber); }
+.charge-line .bad { color: var(--red); }
+
+.explanation {
+  margin: 0.8rem 0;
+  padding: 0.6rem 0.9rem;
+  border-left: 3px solid var(--line);
+  background: var(--card);
+  font-style: italic;
+  overflow-wrap: anywhere;
+}
+
+.followup {
+  margin-top: 1.4rem;
+  padding: 0.9rem 0 0.2rem 1rem;
+  border-left: 3px solid var(--line);
+}
+
+.followup h3 {
+  margin: 0 0 0.4rem;
+  font-family: var(--serif);
+  font-size: 1.05rem;
+}
+
+@media (max-width: 40rem) {
+  #app {
+    padding: 1.5rem 0.9rem 3rem;
+  }
+
+  h1 {
+    font-size: 1.55rem;
+  }
+
+  .step {
+    padding: 1.25rem 1rem 1.25rem 1rem;
+  }
+
+  .step::before {
+    position: static;
+    margin-bottom: 0.5rem;
+  }
+
+  .compare-table th,
+  .compare-table td {
+    padding: 0.35rem 0.35rem;
+  }
+}

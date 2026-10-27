@@ -1,0 +1,6 @@
+evidence/
+.demo-scratch/
+.ota/state/
+.ota/contracts/
+.ota/receipts/
+.ota/proof/

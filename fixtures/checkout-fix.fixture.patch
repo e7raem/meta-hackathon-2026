@@ -1,0 +1,21 @@
+From: Author-provided fixture
+Subject: [PATCH] FIXTURE: restore per-line discount eligibility
+
+diff --git a/src/checkout.ts b/src/checkout.ts
+--- a/src/checkout.ts
++++ b/src/checkout.ts
+@@ -1,10 +1,8 @@
+ export function checkoutTotal(
+   lines: ReadonlyArray<{ amount: number; discountEligible: boolean }>,
+ ): number {
+-  const basketTotal = lines.reduce(
+-    (total, line) => total + line.amount,
+-    0,
+-  );
+-
+-  return basketTotal * 9 / 10;
++  return lines.reduce(
++    (total, line) => total + (line.discountEligible ? line.amount * 9 / 10 : line.amount),
++    0,
++  );
+ }

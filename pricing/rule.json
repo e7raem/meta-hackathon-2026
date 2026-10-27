@@ -1,0 +1,6 @@
+{
+  "id": "pricing-v1",
+  "title": "Cart pricing with an eligible-subtotal voucher",
+  "text": "Apply a 10% discount to each discount-eligible line first. Compute the subtotal of those eligible lines after discount. Deduct one 500-minor-unit voucher from the cart only when that post-discount eligible subtotal is at least 10000 minor units. Add all ineligible lines at their unchanged amounts. Apply at most one voucher per cart, irrespective of the number of eligible lines.",
+  "domain": "A cart contains 1 to 4 lines. Every line has an integer amount from 100 through 100000 minor units, inclusive, in multiples of 100, and a required boolean discountEligible. Inputs outside this domain are not part of this case. No tax or rounding is involved."
+}

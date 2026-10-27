@@ -1,0 +1,304 @@
+version: 1
+
+project:
+  name: meta-change-reviewer-slice-1
+  description: Prepared checkout PR with baseline checks, bounded Muse feedback, original/A/B controls and same-test red-green.
+
+metadata:
+  ota:
+    minimum_version: "1.6.28"
+
+execution:
+  preferred: native
+  supported:
+    - native
+
+toolchains:
+  node:
+    version: "=24.22.1"
+    fulfillment:
+      mode: none
+
+env:
+  vars:
+    META_DEMO_APPROVAL_FILE:
+      required: false
+    OTA_DEMO_TEST_OTA:
+      required: false
+    OTA_DEMO_TEST_OTA_SHA256:
+      required: false
+    OTA_DEMO_TEST_CHECKPOINT:
+      required: false
+    OTA_DEMO_TEST_CHECKPOINT_SHA256:
+      required: false
+
+surfaces:
+  pricing:
+    kind: http
+    label: Local pricing-regression reproducer
+    purpose: Review proposed expectations before executing the fixed pricing comparison.
+    visibility: internal
+    port: 48761
+    path: /
+    readiness:
+      kind: http
+      method: GET
+      path: /health
+      success:
+        status: [200]
+      interval: 1s
+      timeout: 2s
+      retries: 5
+
+tasks:
+  "verify:shallow":
+    description: Run the original all-eligible smoke checks.
+    requirements:
+      toolchains: [node]
+    command:
+      exe: node
+      args:
+        - checks/shallow.ts
+
+  "verify:semantic":
+    description: Run the frozen accepted semantic checker against the current source.
+    requirements:
+      toolchains: [node]
+    notes: |
+      Historical seeded BAD source intentionally fails this task. It is not the
+      live pricing MVP's verification entrypoint; never weaken the checker.
+    command:
+      exe: node
+      args:
+        - checks/semantic.ts
+
+  "verify:report":
+    description: Test the static evidence renderer using isolated fixture-owned evidence paths.
+    requirements:
+      toolchains: [node]
+    command:
+      exe: node
+      args:
+        - --test
+        - checks/report.test.mjs
+    effects:
+      writes:
+        - evidence/
+
+  "report:render":
+    description: Render only evidence/review.json to the static evidence/report.html card.
+    requirements:
+      toolchains: [node]
+    command:
+      exe: node
+      args:
+        - tools/report.mjs
+    effects:
+      writes:
+        - evidence/
+
+  "verify:pricing":
+    description: Check the written pricing rule and prepared original/change controls offline.
+    requirements:
+      toolchains: [node]
+    command:
+      exe: node
+      args: [--test, checks/pricing.test.mjs]
+    effects:
+      network: false
+    notes: |
+      Deterministic authored controls, not model-generated or customer evidence.
+      The independent written rule is the oracle, never baseline behaviour alone.
+
+  "verify:baseline":
+    description: Run the same three ordinary basket assertions against original and proposed checkout code.
+    requirements:
+      toolchains: [node]
+    command:
+      exe: node
+      args: [--max-old-space-size=128, --test, --test-reporter=tap, checks/baseline.test.mjs]
+    effects:
+      network: false
+    notes: |
+      Six actual assertions, three baskets times two versions. This honest limited
+      baseline has no voucher-boundary coverage; it is not the witness fixture suite.
+
+  "verify:web":
+    description: Check UI validation and flow using injected mock fetch only.
+    requirements:
+      toolchains: [node]
+    command:
+      exe: node
+      args: [--test, checks/web-flow.test.mjs]
+    effects:
+      network: false
+    notes: |
+      No listener, browser, provider request, credential, or DOM screenshot proof.
+
+  "verify:live":
+    description: Check controller, feedback binding, retained checkpoint, durable budget and export persistence offline.
+    only_on: [macos]
+    requirements:
+      toolchains: [node]
+    command:
+      exe: node
+      args: [--test, checks/live-demo.test.mjs]
+    effects:
+      writes: [evidence/live-tests/]
+      network: false
+    notes: |
+      Synthetic providers/runners/reviewer declarations only. Tests own and remove
+      unique temporary directories; they do not initialize the operational budget.
+
+  "verify:live-mvp":
+    description: Run the finite offline pricing, UI and controller checks.
+    only_on: [macos]
+    aggregate:
+      tasks: [verify:pricing, verify:baseline, verify:web, verify:live, verify:delivery]
+    notes: |
+      Not a live API, browser, exported-test, CI, release or production qualification.
+
+  "verify:delivery":
+    description: Prove fixed disposable-copy baseline and same-test red-green execution offline.
+    only_on: [macos]
+    requirements:
+      toolchains: [node]
+      env: [OTA_DEMO_TEST_OTA, OTA_DEMO_TEST_OTA_SHA256]
+    command:
+      exe: node
+      args: [--test, checks/delivery.test.mjs]
+    effects:
+      writes: [evidence/delivery-tests/]
+      network: false
+    notes: |
+      Requires an already-qualified released Ota executable and its SHA-256.
+      Calls real declared tasks in owned copies; no provider, key, approval or ledger.
+      Authored integration fixtures, not fresh model evidence or an OS sandbox.
+
+  "verify:export":
+    description: Run the exact persisted regression test against the selected prepared change.
+    requirements:
+      toolchains: [node]
+    command:
+      exe: node
+      args: [--max-old-space-size=128, --test, --test-reporter=tap, evidence/regression.test.mjs]
+    effects:
+      network: false
+    notes: |
+      Requires an actual persisted export. A reproduced candidate regression
+      intentionally produces a failing assertion; missing export is not a pass.
+      Recheck the export hash before running. No model-produced executable code.
+
+  "demo:live:budget":
+    description: Explicitly initialize one approved private six-request budget; refuse existing state.
+    only_on: [macos]
+    requirements:
+      toolchains: [node]
+      env: [META_DEMO_APPROVAL_FILE]
+    command:
+      exe: node
+      args: [tools/live-demo.mjs, --initialize-budget]
+    effects:
+      writes: [evidence/live/]
+      network: false
+    notes: |
+      Separate operator-approved initialization, never an automatic server dependency.
+      Requires the reviewed private approval and pre-created private directories.
+      Existing/corrupt/uncertain state is never reset or silently adopted.
+
+  "demo:live":
+    description: Start the reviewed loopback-only pricing reproducer for one approved window.
+    only_on: [macos]
+    requirements:
+      toolchains: [node]
+      env: [META_DEMO_APPROVAL_FILE]
+    launch:
+      kind: command
+      exe: node
+      args: [tools/live-demo.mjs]
+    runtime:
+      kind: service
+      surfaces:
+        pricing:
+          bind:
+            address: 127.0.0.1
+            port:
+              mode: fixed
+              value: 48761
+          project:
+            host:
+              address: 127.0.0.1
+              port:
+                mode: fixed
+                value: 48761
+              path: /
+              primary: true
+    effects:
+      writes: [evidence/live/, evidence/regression.test.mjs]
+      network: true
+      network_kind: integration_test
+    notes: |
+      Task admission is not live-use approval. Independent frozen-source review
+      and exact operational clearance are required before starting this service.
+      The private approval binds sources, Node, fixed key path, deadline and six
+      additional requests. Durable reservations precede dispatch; failures count.
+      No retry/fallback, top-up, arbitrary code, repair application or deployment.
+      Reviewer declarations are not identity attestation. Prepared audited code
+      runs in a bounded child without the provider credential, not an OS sandbox.
+      The controller persists the export and evidence; browser downloads are copies.
+      Actual baseline and same-test red-green checks use pinned released Ota in
+      private source copies; only the prepared reviewed implementation changes.
+      The correction is not generated by Muse. Copies contain no key/approval/ledger.
+      The six-total ledger retains prior consumption; this task never renews it.
+      One outcome-informed feedback attempt per root proposal requires fresh
+      baseline/B control, an exclusive durable marker and the same budget.
+      Optional owner-pinned retained context imports historical initial facts,
+      never new execution, identity attestation, provider authority or a reset.
+      Ota declares execution/effects, not comprehensive network or process containment.
+
+  "demo:excluded":
+    description: Harmless marker-writing task excluded from agent admission.
+    command:
+      exe: node
+      args:
+        - --input-type=commonjs
+        - -e
+        - >-
+          const fs = require("node:fs");
+          fs.mkdirSync(".demo-scratch", { recursive: true });
+          fs.writeFileSync(".demo-scratch/excluded.marker", "excluded demo task\n");
+    effects:
+      writes:
+        - .demo-scratch/
+
+agent:
+  entrypoint: verify:live-mvp
+  default_task: verify:live-mvp
+  safe_tasks:
+    - verify:shallow
+    - verify:semantic
+    - verify:report
+    - report:render
+    - verify:pricing
+    - verify:baseline
+    - verify:web
+    - verify:live
+    - verify:live-mvp
+    - verify:delivery
+    - verify:export
+    - demo:live:budget
+    - demo:live
+  verify_after_changes:
+    - verify:live-mvp
+  writable_paths:
+    - src/
+    - evidence/
+  protected_paths:
+    - ota.yaml
+    - checks/
+    - fixtures/
+    - tools/report.mjs
+    - tools/live-demo.mjs
+    - tools/pricing-runner.mjs
+    - pricing/
+    - web/
