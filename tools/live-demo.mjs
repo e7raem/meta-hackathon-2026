@@ -246,7 +246,8 @@ function casesFromResponse(response) {
   requireThat(parts?.length === 1 && bounded(parts[0].text, 16000), "MODEL_OUTPUT_INVALID", 502);
   const value = JSON.parse(parts[0].text);
   requireThat(exact(value, ["cases"]) && Array.isArray(value.cases)
-    && value.cases.length > 0 && value.cases.length <= 3, "MODEL_CASES_INVALID", 502);
+    && value.cases.length <= 3, "MODEL_CASES_INVALID", 502);
+  requireThat(value.cases.length > 0, "NO_CASES_PROPOSED", 422);
   return value.cases.map((c, i) => {
     requireThat(exact(c, ["lines", "expectedTotal", "rationale"]) && isCart(c.lines)
       && integer(c.expectedTotal) && bounded(c.rationale), "MODEL_CASES_INVALID", 502);

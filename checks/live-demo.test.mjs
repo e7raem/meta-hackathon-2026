@@ -225,6 +225,22 @@ test("malformed/empty/incomplete model data and arbitrary dispatch fields cannot
   assert.equal(f.calls.provider, 0);
 });
 
+test("valid empty model cases are inconclusive, not malformed or a meaningful comparison", async () => {
+  const f = fixture();
+  f.raw.output[0].content[0].text = '{"cases":[]}';
+  await assert.rejects(() => f.controller.action("/api/propose", {
+    changeId: "a", requestId: "request-no-cases",
+  }), (error) => error.code === "NO_CASES_PROPOSED" && error.status === 422);
+  assert.equal(f.calls.provider, 1); assert.equal(f.calls.reservations, 1);
+  assert.equal(f.calls.runner, 0); assert.equal(f.calls.exports.length, 0);
+  assert.equal(f.calls.retained.length, 1, "completed empty response is retained, not relabelled transport failure");
+  assert.deepEqual(f.calls.retained[0].value, f.raw);
+  await assert.rejects(() => f.controller.action("/api/compare", {
+    acceptedId: "not-created", requestId: "request-empty-compare",
+  }), /ACCEPTED_CASES_REQUIRED/);
+  assert.equal(f.calls.runner, 0);
+});
+
 test("concurrent action is refused, not another model call or hidden retry", async () => {
   let release;
   const wait = new Promise((done) => { release = done; });

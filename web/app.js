@@ -270,6 +270,9 @@ function apiError(code, message) {
 }
 
 function describeError(error) {
+  if (error?.code === "NO_CASES_PROPOSED") {
+    return "NO_CASES_PROPOSED: INCONCLUSIVE. Muse proposed no cases; no implementations were run. This is not approval.";
+  }
   const text = error instanceof Error ? error.message : String(error);
   return text.length > 500 ? `${text.slice(0, 500)}…` : text;
 }
@@ -906,7 +909,11 @@ function startBrowserApp() {
     } else if (state.inFlight === "usage") {
       setStatus(nodes.proposeStatus, "Reading the durable budget; no model call…", "pending");
     } else if (state.errors.propose) {
-      setStatus(nodes.proposeStatus, `Proposal failed and was not retried: ${state.errors.propose}`, "error");
+      if (state.errors.propose.startsWith("NO_CASES_PROPOSED:")) {
+        setStatus(nodes.proposeStatus, state.errors.propose, "warn");
+      } else {
+        setStatus(nodes.proposeStatus, `Proposal failed and was not retried: ${state.errors.propose}`, "error");
+      }
     } else if (state.proposal) {
       setStatus(
         nodes.proposeStatus,

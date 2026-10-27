@@ -563,6 +563,29 @@ test("nullable token usage accepts a charged proposal and displays UNKNOWN rathe
   assert.equal(validateProposal(proposalBody({ usage: { inputTokens: "0", outputTokens: null } })).ok, false);
 });
 
+test("valid empty proposal is visibly inconclusive, never comparison approval or an automatic retry", async () => {
+  const { store, calls } = makeApp([
+    () => respond(200, sessionBody()),
+    () => respond(422, { error: { code: "NO_CASES_PROPOSED", message: "No cases" } }),
+    () => respond(200, sessionBody({ callsUsed: 1 })),
+  ]);
+  await store.loadSession(); store.selectChange("b");
+  assert.equal((await store.propose()).ok, false);
+  assert.match(store.getState().errors.propose, /INCONCLUSIVE/);
+  assert.match(store.getState().errors.propose, /Muse proposed no cases; no implementations were run/);
+  assert.match(store.getState().errors.propose, /not approval/);
+  assert.equal(store.getState().proposal, null);
+  assert.equal(store.getState().comparison, null);
+  assert.equal(store.getState().budgetKnown, false);
+  assert.deepEqual(await store.compare(), { ok: false, reason: "not_accepted" });
+  assert.deepEqual(await store.exportTest(), { ok: false, reason: "no_comparison" });
+  assert.deepEqual(await store.propose(), { ok: false, reason: "usage_unknown" });
+  assert.equal(calls.length, 2);
+  await store.refreshUsage();
+  assert.equal(store.getState().session.callsUsed, 1);
+  assert.equal(calls[2].url, API_PATHS.session);
+});
+
 test("proposal and comparison origins must stay literal; RECORDED data is never promoted", async () => {
   const { store } = makeApp([
     () => respond(200, sessionBody()),

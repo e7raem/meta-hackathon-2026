@@ -8,6 +8,8 @@ or correct expected totals before either implementation's outcomes are exposed.
 Only then does a fixed audited runner compare the original and selected change.
 The baseline is not the specification. Comparison reports `REPRODUCED`,
 `NO_COUNTEREXAMPLE`, or `INCONCLUSIVE`, never universal correctness.
+Valid empty model output is `NO_CASES_PROPOSED` / inconclusive: no implementations
+run, no accepted case set or approval is created, and its request remains consumed.
 
 The rule discounts eligible lines first, applies one voucher only when their
 post-discount subtotal qualifies, then includes unchanged ineligible lines.
