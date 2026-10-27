@@ -15,11 +15,12 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[a-zA-Z0-9-]{8,80}$/;
 const validId = (x) => typeof x === "string" && ID.test(x);
+export const SCENARIO_IDS = Object.freeze(["a", "c"]);
 const MODEL = "muse-spark-1.3";
 export const RUNTIME_FILES = ["pricing/rule.json", "pricing/original.ts", "pricing/change-a.ts",
   "pricing/change-b.ts", "tools/live-demo.mjs", "tools/pricing-runner.mjs",
   "web/index.html", "web/app.js", "web/styles.css", "pricing/baseline.json",
-  "checks/baseline.test.mjs", "ota.yaml", "package.json"];
+  "checks/baseline.test.mjs", "ota.yaml", "package.json", "pricing/change-c.ts", "checks/baseline-c.test.mjs"];
 const CHILDREN = new Set();
 const PROVIDER_REQUESTS = new Set();
 const sha = (value) => createHash("sha256").update(value).digest("hex");
@@ -111,7 +112,7 @@ export async function persistRegression({ root = ROOT, runDirectory, scopeId, ru
   requireThat(typeof source === "string" && Buffer.byteLength(source) <= 16384,
     "EXPORT_LIMIT");
   const path = exportArtifactPath(scopeId, exportId);
-  requireThat(runDirectory === join(root, "evidence/live", scopeId) && validId(runId) && scenarioId === "a",
+  requireThat(runDirectory === join(root, "evidence/live", scopeId) && validId(runId) && SCENARIO_IDS.includes(scenarioId),
     "EXPORT_BINDING_INVALID");
   await privateDirectory(runDirectory);
   const exports = join(runDirectory, "exports");
@@ -257,7 +258,7 @@ export function checkRequest(method, path, headers, nonce) {
 }
 
 export function exportRegression(changeId, cases) {
-  requireThat(["a", "b"].includes(changeId) && cases.length > 0 && cases.length <= 3
+  requireThat(SCENARIO_IDS.includes(changeId) && cases.length > 0 && cases.length <= 3
     && cases.every((c) => isCart(c.lines) && integer(c.expectedTotal)), "INVALID_EXPORT");
   const data = cases.map((c) => ({ lines: c.lines, expected: c.expectedTotal }));
   return 'import assert from "node:assert/strict";\nimport { test } from "node:test";\n'
@@ -318,7 +319,8 @@ const basketIdentity = (lines) => sha(JSON.stringify(lines.map((x) => [x.amount,
   .sort((a, b) => a[0] - b[0] || Number(a[1]) - Number(b[1]))));
 
 export function feedbackContext({ run, control, selected, ruleSha256, controlSha256, provenance }) {
-  const binding = { domain: "break-this-pr/feedback-context/v1", runId: run.runId,
+  requireThat(SCENARIO_IDS.includes(selected.change.id), "CHANGE_NOT_FOUND", 404);
+  const binding = { domain: "break-this-pr/feedback-context/v2", scenarioId: selected.change.id, runId: run.runId,
     acceptedId: run.acceptedId, proposalId: selected.record.proposalId,
     acceptedCases: sha(JSON.stringify(selected.record.acceptedCases)), rule: ruleSha256,
     original: selected.change.originalSha256, candidate: selected.change.candidateSha256,
@@ -327,7 +329,7 @@ export function feedbackContext({ run, control, selected, ruleSha256, controlSha
     provenance: sha(JSON.stringify(provenance ?? null)) };
   requireThat([binding.rule, binding.original, binding.candidate, binding.control].every((x) => HASH.test(x)),
     "FEEDBACK_SOURCES_REQUIRED", 503);
-  const bindingId = sha("break-this-pr/feedback-binding/v1\n" + JSON.stringify(binding));
+  const bindingId = sha("break-this-pr/feedback-binding/v2\n" + JSON.stringify(binding));
   return { bindingId, runId: run.runId, binding, rule: selected.change.rule,
     originalSource: selected.change.originalSource, proposedSource: selected.change.candidateSource,
     acceptedCases: selected.record.acceptedCases, initialRows: run.rows, controlRows: control.rows,
@@ -505,11 +507,11 @@ export function createController({ changes, scope, ledger, provider, runner, ver
         await verifySources();
         lifecycle.check();
         if (path === "/api/baseline") {
-          requireThat(exact(body, ["changeId", "requestId"]) && body.changeId === "a", "INVALID_FIELDS");
-          const change = changes.find((c) => c.id === body.changeId);
+          requireThat(exact(body, ["changeId", "requestId"]) && SCENARIO_IDS.includes(body.changeId), "INVALID_FIELDS");
+          const change = changes.find((c) => c.id === body.changeId && SCENARIO_IDS.includes(c.id));
           requireThat(change && verification && baselineCoverage, "BASELINE_UNAVAILABLE", 503);
-          const actual = await verification.baseline(); lifecycle.check();
-          const result = { kind: "baseline", origin: "LOCAL_EXECUTION", changeId: "a",
+          const actual = await verification.baseline(body.changeId); lifecycle.check();
+          const result = { kind: "baseline", origin: "LOCAL_EXECUTION", changeId: body.changeId,
             status: actual.status, coverage: baselineCoverage, execution: actual.execution,
             sourceIdentities: { original: change.originalSha256, candidate: change.candidateSha256,
               baseline: baselineIdentity },
@@ -517,14 +519,14 @@ export function createController({ changes, scope, ledger, provider, runner, ver
               "This baseline does not exercise voucher-boundary cases or prove the whole PR."] };
           requireThat(actual.cleanup?.ownedCopiesRemoved === true, "COPY_CLEANUP_INCOMPLETE", 503);
           await retain("baseline-" + body.requestId, result); lifecycle.check();
-          if (actual.status === "PASS" && passing(actual.execution, 6)) baselines.set("a", result);
-          else baselines.delete("a");
+          if (actual.status === "PASS" && passing(actual.execution, 6)) baselines.set(body.changeId, result);
+          else baselines.delete(body.changeId);
           return result;
         }
         if (path === "/api/propose") {
           requireThat(exact(body, ["changeId", "requestId"]), "INVALID_FIELDS");
           requireThat(!retainedInitial, "RETAINED_INITIAL_MODE", 409);
-          const change = changes.find((c) => c.id === body.changeId);
+          const change = changes.find((c) => c.id === body.changeId && SCENARIO_IDS.includes(c.id));
           requireThat(change, "CHANGE_NOT_FOUND", 404);
           requireThat(baselines.has(body.changeId), "PASSING_BASELINE_REQUIRED", 409);
           const callsUsed = await ledger.reserve(body.requestId);
@@ -544,7 +546,7 @@ export function createController({ changes, scope, ledger, provider, runner, ver
           lifecycle.check();
           const cases = casesFromResponse(raw);
           const proposalId = randomUUID();
-          const result = { kind: "proposal", origin: "LIVE", proposalId, model: MODEL, cases,
+          const result = { kind: "proposal", origin: "LIVE", scenarioId: change.id, proposalId, model: MODEL, cases,
             usage: modelUsage(raw), callsUsed };
           await retain("proposal-" + proposalId, result); lifecycle.check();
           proposals.set(proposalId, { ...result, change, rootProposalId: proposalId,
@@ -572,7 +574,8 @@ export function createController({ changes, scope, ledger, provider, runner, ver
               expectationOrigin: expectedTotal === c.expectedTotal ? "META_ACCEPTED" : "REVIEWER_CORRECTED" };
           });
           const acceptedId = randomUUID();
-          const record = { kind: "accepted", origin: "LIVE", acceptedId, proposalId: proposal.proposalId, acceptedCases };
+          const record = { kind: "accepted", origin: "LIVE", scenarioId: proposal.change.id,
+            acceptedId, proposalId: proposal.proposalId, acceptedCases };
           await retain("accepted-" + acceptedId, { ...record,
             reviewEvidence: "operator declaration, not independently attested human identity" });
           lifecycle.check();
@@ -601,7 +604,8 @@ export function createController({ changes, scope, ledger, provider, runner, ver
           const rows = comparisonRows(actual, frozen);
           const status = comparisonStatus(rows);
           const runId = randomUUID();
-          const result = { kind: "comparison", origin: "LIVE", runId, acceptedId: body.acceptedId, status, rows,
+          const result = { kind: "comparison", origin: "LIVE", scenarioId: selected.change.id,
+            runId, acceptedId: body.acceptedId, status, rows,
             sourceIdentities: { original: selected.change.originalSha256, candidate: selected.change.candidateSha256,
               acceptedCases: sha(JSON.stringify(frozen)) },
             limits: ["Selected prepared code/cases only; original behaviour is not the specification.",
@@ -617,7 +621,7 @@ export function createController({ changes, scope, ledger, provider, runner, ver
           requireThat(exact(body, ["runId", "requestId"]), "INVALID_FIELDS");
           const run = runs.get(body.runId);
           requireThat(run, "MEANINGFUL_RUN_REQUIRED", 409);
-          requireThat(baselines.has("a"), "PASSING_BASELINE_REQUIRED", 409);
+          requireThat(baselines.has(run.selected.change.id), "PASSING_BASELINE_REQUIRED", 409);
           requireThat(HASH.test(controlIdentity), "CONTROL_SOURCE_REQUIRED", 503);
           requireThat(!run.controlAttempted, "CONTROL_ALREADY_RUN", 409); run.controlAttempted = true;
           const frozen = run.selected.record.acceptedCases;
@@ -627,7 +631,7 @@ export function createController({ changes, scope, ledger, provider, runner, ver
             candidate: { value: null, error: "RUNNER_NOT_ESTABLISHED" } })) }; }
           lifecycle.check(); await verifySources(); lifecycle.check();
           const rows = comparisonRows(actual, frozen);
-          const result = { kind: "control", origin: "LOCAL_EXECUTION", controlId: randomUUID(),
+          const result = { kind: "control", origin: "LOCAL_EXECUTION", scenarioId: run.selected.change.id, controlId: randomUUID(),
             runId: body.runId, acceptedId: run.result.acceptedId, status: comparisonStatus(rows), rows,
             sourceIdentities: { original: run.selected.change.originalSha256, candidate: controlIdentity,
               acceptedCases: sha(JSON.stringify(frozen)) },
@@ -641,7 +645,7 @@ export function createController({ changes, scope, ledger, provider, runner, ver
           const run = runs.get(body.runId);
           requireThat(run?.result.status === "REPRODUCED" && !run.selected.feedback,
             "INITIAL_REPRODUCED_RUN_REQUIRED", 409);
-          requireThat(baselines.has("a"), "PASSING_BASELINE_REQUIRED", 409);
+          requireThat(baselines.has(run.selected.change.id), "PASSING_BASELINE_REQUIRED", 409);
           requireThat(run.control?.controlId === body.controlId && run.control.status === "NO_COUNTEREXAMPLE",
             "MATCHING_CONTROL_REQUIRED", 409);
           requireThat(feedbackProvider && feedbackAttempts, "FEEDBACK_UNAVAILABLE", 503);
@@ -669,9 +673,9 @@ export function createController({ changes, scope, ledger, provider, runner, ver
           lifecycle.check(); await verifySources(); lifecycle.check();
           await retain("feedback-model-" + callsUsed, raw); lifecycle.check();
           const parsed = feedbackFromResponse(raw, packet);
-          const proposal = parsed.status === "FOLLOW_UP_PROPOSED" ? { kind: "proposal", origin: "LIVE",
+          const proposal = parsed.status === "FOLLOW_UP_PROPOSED" ? { kind: "proposal", origin: "LIVE", scenarioId: run.selected.change.id,
             proposalId: randomUUID(), model: MODEL, cases: parsed.cases, usage: modelUsage(raw), callsUsed } : null;
-          const result = { kind: "feedback", origin: "LIVE", feedbackId: randomUUID(), runId: body.runId,
+          const result = { kind: "feedback", origin: "LIVE", scenarioId: run.selected.change.id, feedbackId: randomUUID(), runId: body.runId,
             controlId: body.controlId, bindingId: packet.bindingId, status: parsed.status,
             explanation: parsed.explanation, proposal, usage: modelUsage(raw), callsUsed,
             limits: ["Model interpretation of bound observed outputs, not independent execution proof or approval.",
@@ -686,7 +690,7 @@ export function createController({ changes, scope, ledger, provider, runner, ver
           requireThat(exact(body, ["runId", "requestId"]), "INVALID_FIELDS");
           const run = runs.get(body.runId);
           requireThat(run && run.result.status !== "INCONCLUSIVE", "MEANINGFUL_RUN_REQUIRED", 409);
-          requireThat(baselines.has("a"), "PASSING_BASELINE_REQUIRED", 409);
+          requireThat(baselines.has(run.selected.change.id), "PASSING_BASELINE_REQUIRED", 409);
           requireThat(!run.exported, "RUN_ALREADY_EXPORTED", 409);
           const testSource = exportRegression(run.selected.change.id, run.selected.record.acceptedCases);
           const exportId = randomUUID(), scenarioId = run.selected.change.id;
@@ -707,7 +711,7 @@ export function createController({ changes, scope, ledger, provider, runner, ver
           const run = runs.get(body.runId);
           requireThat(run?.result.status === "REPRODUCED" && run.exported?.exportId === body.exportId && verification,
             "REPRODUCED_EXPORT_REQUIRED", 409);
-          requireThat(baselines.has("a"), "PASSING_BASELINE_REQUIRED", 409);
+          requireThat(baselines.has(run.selected.change.id), "PASSING_BASELINE_REQUIRED", 409);
           requireThat(!run.regressionAttempted, "REGRESSION_ALREADY_RUN", 409);
           run.regressionAttempted = true;
           const proof = await verification.regression({ testSource: run.exported.testSource,
@@ -748,7 +752,7 @@ const initialPrompt = "Propose at most three concrete cases to check this pricin
   + "The original is not a specification. Give an integer expected total from the rule, and a brief rationale. "
   + "Do not return code, commands, a repair, or a general safety verdict. If no useful case can be identified return cases:[].\n";
 const feedbackPrompt = "This is ONE outcome-informed feedback turn, not fresh uncoached discovery. "
-  + "The input contains reviewed cases and actual outputs from original, proposed A and fixed reviewed B. "
+  + "The input contains reviewed cases and actual outputs from original, selected proposed change, and reviewed correction. "
   + "Explain the specific observed fault in at most 600 characters; do not invent observations. "
   + "Echo bindingId and runId exactly. observedFaultCaseIds must equal the set of initialRows caseIds whose "
   + "original equals expectedTotal and candidate differs, with neither error. "
@@ -911,7 +915,7 @@ function assertionFailure(execution, tests, failures) {
 }
 
 export async function runDeclaredVerification({ task, cwd, nodeExecutable, otaExecutable, lifecycle }) {
-  requireThat(["verify:baseline", "verify:export"].includes(task), "VERIFICATION_TASK_REFUSED");
+  requireThat(["verify:baseline", "verify:baseline:c", "verify:export"].includes(task), "VERIFICATION_TASK_REFUSED");
   const dirs = { HOME: ".verification-home", TMPDIR: ".verification-tmp",
     XDG_CONFIG_HOME: ".verification-config", XDG_CACHE_HOME: ".verification-cache" };
   const environment = { ...buildRunnerEnvironment(nodeExecutable), CI: "true" };
@@ -926,13 +930,14 @@ export async function runDeclaredVerification({ task, cwd, nodeExecutable, otaEx
 }
 
 export function createPricingVerification({ root, runDirectory, scopeId, sourceHashes, execute, lifecycle, verifySources }) {
-  async function checkCopy(copy, corrected = false) {
+  async function checkCopy(copy, correctedScenario = null) {
     for (const file of RUNTIME_FILES) {
-      const expected = corrected && file === "pricing/change-a.ts" ? sourceHashes["pricing/change-b.ts"] : sourceHashes[file];
+      const expected = correctedScenario && file === `pricing/change-${correctedScenario}.ts`
+        ? sourceHashes["pricing/change-b.ts"] : sourceHashes[file];
       requireThat(sha(await readPrivate(join(copy, file), 131072)) === expected, "COPY_SOURCE_CHANGED", 503);
     }
   }
-  async function makeCopy(parent, name, corrected = false) {
+  async function makeCopy(parent, name, correctedScenario = null) {
     const copy = join(parent, name); await mkdir(copy, { mode: 0o700 });
     for (const file of RUNTIME_FILES) {
       lifecycle.check();
@@ -941,14 +946,15 @@ export function createPricingVerification({ root, runDirectory, scopeId, sourceH
       await mkdir(dirname(join(copy, file)), { recursive: true, mode: 0o700 });
       await exclusiveBytes(join(copy, file), bytes);
     }
-    if (corrected) {
-      const target = join(copy, "pricing/change-a.ts");
-      requireThat(sha(await readPrivate(target)) === sourceHashes["pricing/change-a.ts"], "COPY_SOURCE_CHANGED", 503);
+    if (correctedScenario) {
+      requireThat(SCENARIO_IDS.includes(correctedScenario), "CHANGE_NOT_FOUND", 404);
+      const target = join(copy, `pricing/change-${correctedScenario}.ts`);
+      requireThat(sha(await readPrivate(target)) === sourceHashes[`pricing/change-${correctedScenario}.ts`], "COPY_SOURCE_CHANGED", 503);
       const correction = await readFile(join(root, "pricing/change-b.ts"));
       requireThat(sha(correction) === sourceHashes["pricing/change-b.ts"], "SOURCE_IDENTITY_CHANGED", 503);
       await unlink(target); await exclusiveBytes(target, correction);
     }
-    await checkCopy(copy, corrected); return copy;
+    await checkCopy(copy, correctedScenario); return copy;
   }
   async function owned(operation) {
     lifecycle.check(); await verifySources(); lifecycle.check();
@@ -968,10 +974,11 @@ export function createPricingVerification({ root, runDirectory, scopeId, sourceH
     return { ...result, cleanup: { ownedCopiesRemoved: true } };
   }
   return {
-    async baseline() {
+    async baseline(scenarioId = "a") {
+      requireThat(SCENARIO_IDS.includes(scenarioId), "CHANGE_NOT_FOUND", 404);
       return owned(async (parent) => {
         const copy = await makeCopy(parent, "baseline"); lifecycle.check();
-        const execution = await execute("verify:baseline", copy); lifecycle.check();
+        const execution = await execute(scenarioId === "a" ? "verify:baseline" : "verify:baseline:c", copy); lifecycle.check();
         await checkCopy(copy);
         const status = passing(execution, 6) ? "PASS"
           : execution.counts && execution.counts.failed > 0
@@ -982,12 +989,12 @@ export function createPricingVerification({ root, runDirectory, scopeId, sourceH
     async regression({ testSource, testSha256, expectedTests, expectedFailures, exportId, runId, scenarioId }) {
       requireThat(integer(expectedTests, 1, 3) && integer(expectedFailures, 1, expectedTests)
         && sha(testSource) === testSha256, "REGRESSION_INPUT_REFUSED");
-      requireThat(scenarioId === "a", "EXPORT_BINDING_CHANGED", 503);
+      requireThat(SCENARIO_IDS.includes(scenarioId), "EXPORT_BINDING_CHANGED", 503);
       const binding = { runDirectory, scopeId, runId, scenarioId, exportId, testSha256 };
       requireThat((await readStoredExport(binding)).toString("utf8") === testSource, "PERSISTED_TEST_CHANGED", 503);
       return owned(async (parent) => {
         const faulty = await makeCopy(parent, "faulty");
-        const corrected = await makeCopy(parent, "corrected", true);
+        const corrected = await makeCopy(parent, "corrected", scenarioId);
         for (const copy of [faulty, corrected]) {
           await mkdir(join(copy, "evidence"), { mode: 0o700 });
           await exclusiveBytes(join(copy, "evidence/regression.test.mjs"), testSource);
@@ -1000,14 +1007,14 @@ export function createPricingVerification({ root, runDirectory, scopeId, sourceH
         if (beforeGreen && assertionFailure(red, expectedTests, expectedFailures)) {
           lifecycle.check(); green = await execute("verify:export", corrected); lifecycle.check();
         }
-        await checkCopy(corrected, true);
+        await checkCopy(corrected, scenarioId);
         const sameTest = beforeGreen && (await Promise.all([faulty, corrected].map(async (copy) =>
           sha(await readPrivate(join(copy, "evidence/regression.test.mjs"))) === testSha256))).every(Boolean);
         await readStoredExport(binding);
         return { red, green, sameTest, testSha256,
           status: sameTest && green && passing(green, expectedTests) ? "RED_THEN_GREEN" : "INCONCLUSIVE",
           correction: { kind: "PRE_REVIEWED_FIXED", label: "Prepared correction reviewed in advance; not Muse-generated.",
-            faultySha256: sourceHashes["pricing/change-a.ts"], correctedSha256: sourceHashes["pricing/change-b.ts"] } };
+            faultySha256: sourceHashes[`pricing/change-${scenarioId}.ts`], correctedSha256: sourceHashes["pricing/change-b.ts"] } };
       });
     },
   };
@@ -1189,9 +1196,10 @@ async function start() {
       && bounded(c.id, 40) && bounded(c.title, 120) && isCart(c.lines)
       && c.expectedTotal === ruleTotal(c.lines)), "BASELINE_INVALID", 503);
   const changes = [];
-  for (const id of ["a"]) {
+  for (const id of SCENARIO_IDS) {
     const candidateSource = await readFile(join(ROOT, "pricing/change-" + id + ".ts"), "utf8");
-    changes.push({ id, title: "Simplify checkout pricing", rule, originalSource, candidateSource,
+    changes.push({ id, title: id === "a" ? "Simplify checkout pricing (A)" : "Consolidate checkout totals (C)",
+      rule, originalSource, candidateSource,
       originalSha256: sha(originalSource), candidateSha256: sha(candidateSource),
       diff: "ORIGINAL\n" + originalSource + "\nPROPOSED\n" + candidateSource });
   }
@@ -1199,8 +1207,7 @@ async function start() {
     lifecycle, verifySources: () => verifyFiles(a),
     execute: (task, cwd) => runDeclaredVerification({ task, cwd, nodeExecutable: a.nodeExecutable,
       otaExecutable: a.otaExecutable, lifecycle }) });
-  const sources = { rule: a.sourceHashes["pricing/rule.json"], original: a.sourceHashes["pricing/original.ts"],
-    candidate: a.sourceHashes["pricing/change-a.ts"], control: a.sourceHashes["pricing/change-b.ts"] };
+  const sources = { rule: a.sourceHashes["pricing/rule.json"], control: a.sourceHashes["pricing/change-b.ts"] };
   const controller = createController({ changes, scope, ledger, lifecycle, baselineCoverage,
     ruleIdentity: sources.rule, controlIdentity: sources.control, feedbackAttempts: createFeedbackAttempts(runDirectory),
     baselineIdentity: a.sourceHashes["pricing/baseline.json"], verification,

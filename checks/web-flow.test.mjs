@@ -20,6 +20,7 @@ import {
   createApiClient,
   createStore,
   initialState,
+  getSelectedChange,
   formatPence,
   describeChargeDifference,
   formatTokenUsage,
@@ -45,19 +46,19 @@ const HEX_D = "d4".repeat(32);
 const HEX_E = "e5".repeat(32);
 const HEX_F = "f1".repeat(32);
 
-function changeEntry() {
+function changeEntry(id = "a") {
   return {
-    id: "a",
-    title: "Simplify checkout totals into a single pass",
+    id,
+    title: id === "a" ? "Simplify checkout totals into a single pass" : "Restructure checkout subtotal calculation",
     rule: {
       id: "rule-a",
       title: "Synthetic pricing rule",
       text: "Synthetic rule text used only by these tests.",
       domain: "1-4 lines; integer amounts 100..100000 pence in multiples of 100; explicit boolean eligibility.",
     },
-    diff: "--- a/original.ts\n+++ b/candidate.ts\n@@ synthetic test diff @@",
+    diff: `--- a/original.ts\n+++ b/candidate-${id}.ts\n@@ synthetic test diff @@`,
     originalSha256: HEX_A,
-    candidateSha256: HEX_B,
+    candidateSha256: id === "a" ? HEX_B : HEX_D,
   };
 }
 
@@ -97,7 +98,7 @@ function sessionBody(overrides = {}) {
     callsUsed: 0,
     limit: 6,
     deadline: "2026-10-27T03:50:52Z",
-    changes: [changeEntry()],
+    changes: [changeEntry(), changeEntry("c")],
     baselineCoverage: baselineCoverage(),
     ...overrides,
   };
@@ -160,6 +161,7 @@ function regressionBody(overrides = {}) {
 function proposalBody(overrides = {}) {
   return {
     kind: "proposal",
+    scenarioId: "a",
     origin: "FIXTURE",
     proposalId: "prop-1",
     model: "synthetic-test-model",
@@ -189,6 +191,7 @@ function proposalBody(overrides = {}) {
 function acceptedBody(overrides = {}) {
   return {
     kind: "accepted",
+    scenarioId: "a",
     origin: "FIXTURE",
     acceptedId: "acc-1",
     proposalId: "prop-1",
@@ -216,6 +219,7 @@ function acceptedBody(overrides = {}) {
 function comparisonBody(overrides = {}) {
   return {
     kind: "comparison",
+    scenarioId: "a",
     origin: "FIXTURE",
     runId: "run-1",
     acceptedId: "acc-1",
@@ -899,9 +903,9 @@ test("validators reject out-of-domain and coerced data instead of accepting trut
   assert.equal(validateSession(sessionBody({ limit: "6" })).ok, false);
   assert.equal(validateSession(sessionBody({ changes: [] })).ok, false);
   assert.equal(validateSession(sessionBody({ changes: [changeEntry(), changeEntry()] })).ok, false,
-    "exactly one prepared change is allowed");
+    "duplicate prepared change ids are refused");
   assert.equal(validateSession(sessionBody({ changes: [{ ...changeEntry(), id: "b" }] })).ok, false,
-    'the single prepared change must have id "a"');
+    "only the exact a/c pair is accepted");
   assert.equal(validateSession(sessionBody({ baselineCoverage: undefined })).ok, false,
     "the public baseline coverage is required");
   const badCoverage = sessionBody();
@@ -1033,6 +1037,7 @@ test("pound input parsing and pence formatting are strict and symmetric", () => 
 function controlBody(overrides = {}) {
   return {
     kind: "control",
+    scenarioId: "a",
     origin: "LOCAL_EXECUTION",
     controlId: "ctl-1",
     runId: "run-1",
@@ -1078,6 +1083,7 @@ function followUpProposalBody(overrides = {}) {
 function feedbackBody(overrides = {}) {
   return {
     kind: "feedback",
+    scenarioId: "a",
     origin: "FIXTURE",
     feedbackId: "fb-1",
     runId: "run-1",
@@ -1535,4 +1541,324 @@ test("new source stays text-only: no unsafe rendering sinks, model text treated 
   }));
   assert.equal(hostile.ok, true,
     "markup in an explanation is accepted as bounded plain text, to be rendered via textContent only");
+});
+
+test("a fresh proposal gets its own feedback attempt without refunding the prior scenario's requests", async () => {
+  const app = makeApp([
+    () => respond(200, sessionBody({ callsUsed: 2, feedbackAttempted: true })),
+    () => respond(200, baselineBody({ changeId: "c" })),
+    () => respond(200, proposalBody({ scenarioId: "c", proposalId: "fresh-proposal-c", callsUsed: 3 })),
+    () => respond(200, acceptedBody({ scenarioId: "c", proposalId: "fresh-proposal-c" })),
+    () => respond(200, comparisonBody({ scenarioId: "c", status: "REPRODUCED", rows: [
+      { caseId: "case-1", expectedTotal: 900, original: { value: 900, error: null }, candidate: { value: 900, error: null } },
+      { caseId: "case-2", expectedTotal: 2900, original: { value: 2900, error: null }, candidate: { value: 2800, error: null } },
+    ] })),
+    () => respond(200, controlBody({ scenarioId: "c" })),
+    () => respond(200, feedbackBody({ scenarioId: "c", callsUsed: 4, status: "STOPPED", proposal: null })),
+  ]);
+  await app.store.loadSession();
+  const session = app.store.getState().session;
+  app.store.selectChange("c");
+  assert.equal(app.store.getState().feedbackAttempted, true, "a switch alone does not renew feedback");
+  await app.store.runBaseline();
+  assert.deepEqual(await app.store.propose(), { ok: true });
+  assert.equal(app.store.getState().session, session);
+  assert.equal(session.callsUsed, 3, "the new proposal consumed another shared request");
+  assert.equal(app.store.getState().feedbackAttempted, false, "the new root has its own one-shot feedback");
+  app.store.confirmReview(true);
+  assert.deepEqual(await app.store.accept(), { ok: true });
+  assert.deepEqual(await app.store.compare(), { ok: true });
+  assert.deepEqual(await app.store.runControl(), { ok: true });
+  assert.deepEqual(await app.store.requestFeedback(), { ok: true });
+  assert.equal(session.callsUsed, 4);
+  assert.equal(app.store.getState().feedbackAttempted, true);
+  assert.deepEqual(await app.store.requestFeedback(), { ok: false, reason: "already_attempted" });
+});
+
+test("session requires precisely A/C and fresh records require explicit scenario provenance", () => {
+  assert.equal(validateSession(sessionBody({ changes: [changeEntry("c"), changeEntry()] })).ok, true);
+  assert.equal(validateSession(sessionBody({ changes: [changeEntry()] })).ok, false);
+  assert.equal(validateSession(sessionBody({ changes: [changeEntry(), changeEntry("b")] })).ok, false);
+  for (const [validator, body] of [
+    [validateProposal, proposalBody], [validateAccepted, acceptedBody],
+    [validateComparison, comparisonBody], [validateControl, controlBody],
+    [validateExport, exportBody], [validateRegression, regressionBody],
+  ]) {
+    assert.equal(validator(body({ scenarioId: "c" })).ok, true);
+    assert.equal(validator(body({ scenarioId: undefined })).ok, false, "no legacy fallback on fresh responses");
+    assert.equal(validator(body({ scenarioId: "b" })).ok, false);
+  }
+  const followUp = feedbackBody({ scenarioId: "c", proposal: followUpProposalBody({ scenarioId: "c" }) });
+  assert.equal(validateFeedback(followUp).ok, true);
+  assert.equal(validateFeedback({ ...followUp, scenarioId: undefined }).ok, false);
+  assert.equal(validateFeedback({ ...followUp, proposal: followUpProposalBody() }).ok, false,
+    "nested feedback proposal must share the feedback scenario");
+
+  const historical = retainedInitialBody();
+  for (const key of ["proposal", "accepted", "comparison"]) delete historical[key].scenarioId;
+  assert.equal(validateRetainedInitial(historical).ok, true, "only explicit historical A context tolerates absence");
+  assert.equal(validateProposal(historical.proposal).ok, false);
+  assert.equal(validateAccepted(historical.accepted).ok, false);
+  assert.equal(validateComparison(historical.comparison).ok, false);
+  historical.proposal.scenarioId = "c";
+  assert.equal(validateRetainedInitial(historical).ok, false, "retained A cannot be relabelled C");
+});
+
+test("C completes a fully bound mocked review and switching clears only review-local state", async () => {
+  const proposal = proposalBody({ scenarioId: "c", proposalId: "prop-c" });
+  const accepted = acceptedBody({ scenarioId: "c", proposalId: "prop-c", acceptedId: "acc-c" });
+  const comparison = comparisonBody({
+    scenarioId: "c", acceptedId: "acc-c", runId: "run-c", status: "REPRODUCED",
+    rows: [
+      { caseId: "case-1", expectedTotal: 900, original: { value: 900, error: null }, candidate: { value: 900, error: null } },
+      { caseId: "case-2", expectedTotal: 2900, original: { value: 2900, error: null }, candidate: { value: 2800, error: null } },
+    ],
+  });
+  const feedback = feedbackBody({
+    scenarioId: "c", runId: "run-c", controlId: "ctl-c",
+    proposal: followUpProposalBody({ scenarioId: "c", proposalId: "prop-c-next" }),
+  });
+  const followUpAccepted = followUpAcceptedBody({
+    scenarioId: "c", proposalId: "prop-c-next", acceptedId: "acc-c-next",
+  });
+  followUpAccepted.acceptedCases[0].expectedTotal = 1350;
+  followUpAccepted.acceptedCases[0].expectationOrigin = "META_ACCEPTED";
+  const followUpRows = [{
+    caseId: "case-3", expectedTotal: 1350,
+    original: { value: 1350, error: null }, candidate: { value: 1350, error: null },
+  }];
+  const { store, calls } = makeApp([
+    () => respond(200, sessionBody()),
+    () => respond(200, baselineBody({ changeId: "c" })),
+    () => respond(200, proposal),
+    () => respond(200, accepted),
+    () => respond(200, comparison),
+    () => respond(200, exportBody({ scenarioId: "c", runId: "run-c" })),
+    () => respond(200, regressionBody({ scenarioId: "c", runId: "run-c" })),
+    () => respond(200, controlBody({ scenarioId: "c", runId: "run-c", acceptedId: "acc-c", controlId: "ctl-c" })),
+    () => respond(200, feedback),
+    () => respond(200, followUpAccepted),
+    () => respond(200, followUpComparisonBody({
+      scenarioId: "c", acceptedId: "acc-c-next", runId: "run-c-next", rows: followUpRows,
+    })),
+    () => respond(200, followUpControlBody({
+      scenarioId: "c", acceptedId: "acc-c-next", runId: "run-c-next", rows: followUpRows,
+    })),
+    () => respond(200, sessionBody({ callsUsed: 2, feedbackAttempted: true })),
+  ]);
+  await store.loadSession();
+  assert.equal(store.getState().selectedChangeId, "a");
+  assert.equal(getSelectedChange(store.getState()).candidateSha256, HEX_B);
+  const session = store.getState().session;
+  const epoch = store.getState().epoch;
+  assert.deepEqual(store.selectChange("c"), { ok: true });
+  assert.equal(store.getState().epoch, epoch + 1);
+  assert.equal(getSelectedChange(store.getState()).candidateSha256, HEX_D);
+  assert.match(getSelectedChange(store.getState()).diff, /candidate-c/);
+  assert.equal(calls.length, 1, "selection is local, not a new session or API call");
+  assert.deepEqual(await store.propose(), { ok: false, reason: "baseline_required" });
+  assert.deepEqual(await store.runBaseline(), { ok: true });
+  assert.deepEqual(await store.propose(), { ok: true });
+  store.confirmReview(true);
+  assert.deepEqual(await store.accept(), { ok: true });
+  assert.deepEqual(await store.compare(), { ok: true });
+  assert.deepEqual(await store.exportTest(), { ok: true });
+  assert.deepEqual(await store.runRegression(), { ok: true });
+  assert.deepEqual(await store.runControl(), { ok: true });
+  assert.deepEqual(await store.requestFeedback(), { ok: true });
+  store.confirmFollowUpReview(true);
+  assert.deepEqual(await store.acceptFollowUp(), { ok: true });
+  assert.deepEqual(await store.compareFollowUp(), { ok: true });
+  assert.deepEqual(await store.runFollowUpControl(), { ok: true });
+  assert.deepEqual(await store.refreshUsage(), { ok: true });
+  assert.equal(store.getState().selectedChangeId, "c", "refresh preserves selection");
+  assert.equal(store.getState().session, session, "refresh preserves the session nonce and budget object");
+  for (const key of ["proposal", "accepted", "comparison", "exportResult", "regression", "control", "feedback"]) {
+    assert.equal(store.getState()[key].scenarioId, "c");
+  }
+  assert.deepEqual(JSON.parse(calls[1].options.body), { changeId: "c", requestId: "req-1" });
+  assert.deepEqual(JSON.parse(calls[2].options.body), { changeId: "c", requestId: "req-2" });
+  assert.deepEqual(JSON.parse(calls[6].options.body), {
+    runId: "run-c", exportId: exportBody().exportId, requestId: "req-6",
+  }, "regression request shape stays bound by IDs, not new caller authority");
+  const confirmed = { ...session };
+  store.getState().errors.compare = "synthetic prior error";
+  assert.deepEqual(store.selectChange("a"), { ok: true });
+  const state = store.getState();
+  assert.equal(state.session, session);
+  for (const key of ["csrfToken", "deadline", "callsUsed", "limit"]) {
+    assert.equal(state.session[key], confirmed[key], `switch preserves ${key}`);
+  }
+  assert.equal(state.session.callsUsed, 2, "no refund of either model request");
+  assert.equal(state.budgetKnown, true);
+  assert.equal(state.feedbackAttempted, true, "switching never reopens a consumed feedback request");
+  for (const key of ["baseline", "proposal", "accepted", "comparison", "exportResult", "regression", "control", "feedback", "followUp"]) {
+    assert.equal(state[key], null, `${key} must be cleared`);
+  }
+  assert.deepEqual(state.expectations, {});
+  assert.equal(state.reviewedConfirmed, false);
+  assert.equal(Object.values(state.errors).every((error) => error === null), true);
+  assert.deepEqual(await store.propose(), { ok: false, reason: "baseline_required" });
+  assert.equal(calls.length, 13);
+});
+
+test("selection refuses all pending actions including the independent proposalPending guard", async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const { store, calls } = makeApp([
+    () => respond(200, sessionBody()),
+    () => respond(200, baselineBody()),
+    async () => { await gate; return respond(200, proposalBody()); },
+  ]);
+  await store.loadSession();
+  assert.deepEqual(store.selectChange("b"), { ok: false, reason: "unknown_change" });
+  for (const action of ["session", "baseline", "usage", "accept", "compare", "export", "regression", "control", "feedback", "followup_accept", "followup_compare", "followup_control"]) {
+    store.getState().inFlight = action;
+    assert.deepEqual(store.selectChange("c"), { ok: false, reason: "busy" });
+    assert.equal(store.getState().selectedChangeId, "a");
+  }
+  store.getState().inFlight = null;
+  await store.runBaseline();
+  const pending = store.propose();
+  await tick();
+  assert.deepEqual(store.selectChange("c"), { ok: false, reason: "busy" });
+  store.getState().inFlight = null;
+  assert.equal(store.getState().proposalPending, true);
+  assert.deepEqual(store.selectChange("c"), { ok: false, reason: "busy" });
+  release();
+  assert.deepEqual(await pending, { ok: true });
+  assert.equal(calls.length, 3);
+  assert.equal(store.getState().session.callsUsed, 1);
+  assert.deepEqual(store.selectChange("c"), { ok: true });
+  assert.equal(store.getState().session.callsUsed, 1);
+});
+
+test("an uncertain model count stays unknown across selection until same-session refresh", async () => {
+  const app = makeApp([
+    () => respond(200, sessionBody()),
+    () => respond(200, baselineBody()),
+    () => respond(502, { error: { code: "PROVIDER_FAILED_CONSUMED", message: "synthetic consumed reservation" } }),
+    () => respond(200, sessionBody({ callsUsed: 1 })),
+    () => respond(200, baselineBody({ changeId: "c" })),
+    () => respond(200, proposalBody({ scenarioId: "c", callsUsed: 2 })),
+    () => respond(200, sessionBody({ callsUsed: 1 })),
+  ]);
+  await app.store.loadSession(); await app.store.runBaseline();
+  assert.equal((await app.store.propose()).ok, false);
+  assert.deepEqual(app.store.selectChange("c"), { ok: true });
+  assert.equal(app.store.getState().budgetKnown, false);
+  assert.deepEqual(await app.store.refreshUsage(), { ok: true });
+  assert.equal(app.store.getState().selectedChangeId, "c");
+  assert.equal(app.store.getState().session.callsUsed, 1);
+  await app.store.runBaseline();
+  assert.deepEqual(await app.store.propose(), { ok: true });
+  assert.equal(app.store.getState().session.callsUsed, 2);
+  assert.equal((await app.store.refreshUsage()).ok, false, "a regressed durable count is refused");
+  assert.equal(app.store.getState().selectedChangeId, "c");
+  assert.equal(app.store.getState().session.callsUsed, 2);
+  assert.equal(app.store.getState().budgetKnown, false);
+});
+
+test("switching never adopts historical A roots into C or back into a fresh A review", async () => {
+  const app = makeApp([() => respond(200, sessionBody({ retainedInitial: retainedInitialBody() }))]);
+  await app.store.loadSession();
+  app.store.selectChange("c");
+  assert.deepEqual(await app.store.exportTest(), { ok: false, reason: "no_comparison" });
+  app.store.selectChange("a");
+  assert.deepEqual(await app.store.exportTest(), { ok: false, reason: "no_comparison" });
+  assert.deepEqual(await app.store.propose(), { ok: false, reason: "baseline_required" });
+  assert.equal(app.store.getState().session.retainedInitial.recordedAt, "2026-10-26T23:59:00Z",
+    "history is retained without adopting it into the new review");
+  assert.equal(app.calls.length, 1);
+});
+
+test("each fresh response rejects cross-scenario substitution even when parent IDs match", async () => {
+  const cases = [
+    ["baseline", async (reply) => makeApp([() => respond(200, sessionBody()), () => respond(200, reply)]),
+      baselineBody({ changeId: "c" }), "runBaseline", "baseline"],
+    ["proposal", async (reply) => {
+      const app = makeApp([() => respond(200, sessionBody()), () => respond(200, baselineBody()), () => respond(200, reply)]);
+      await app.store.loadSession(); await app.store.runBaseline(); return app;
+    }, proposalBody({ scenarioId: "c" }), "propose", "proposal"],
+    ["acceptance", async (reply) => {
+      const app = makeApp([() => respond(200, sessionBody()), () => respond(200, baselineBody()),
+        () => respond(200, proposalBody()), () => respond(200, reply)]);
+      await app.store.loadSession(); await app.store.runBaseline(); await app.store.propose();
+      app.store.confirmReview(true); return app;
+    }, acceptedBody({ scenarioId: "c" }), "accept", "accepted"],
+    ["comparison", async (reply) => appAtAccepted([() => respond(200, reply)]),
+      comparisonBody({ scenarioId: "c" }), "compare", "comparison"],
+    ["export", async (reply) => {
+      const app = await appAtAccepted([() => respond(200, comparisonBody({ status: "REPRODUCED" })), () => respond(200, reply)]);
+      await app.store.compare(); return app;
+    }, exportBody({ scenarioId: "c" }), "exportTest", "exportResult"],
+    ["regression", async (reply) => {
+      const app = await appAtAccepted([() => respond(200, comparisonBody({ status: "REPRODUCED" })),
+        () => respond(200, exportBody()), () => respond(200, reply)]);
+      await app.store.compare(); await app.store.exportTest(); return app;
+    }, regressionBody({ scenarioId: "c" }), "runRegression", "regression"],
+    ["control", async (reply) => {
+      const app = await appAtAccepted([() => respond(200, comparisonBody({ status: "REPRODUCED" })), () => respond(200, reply)]);
+      await app.store.compare(); return app;
+    }, controlBody({ scenarioId: "c" }), "runControl", "control"],
+    ["feedback", async (reply) => appAtControl([() => respond(200, reply)]),
+      feedbackBody({ scenarioId: "c", proposal: followUpProposalBody({ scenarioId: "c" }) }), "requestFeedback", "feedback"],
+  ];
+  for (const [label, setup, reply, method, field] of cases) {
+    const app = await setup(reply);
+    if (!app.store.getState().session) await app.store.loadSession();
+    assert.equal((await app.store[method]()).ok, false, label);
+    assert.equal(app.store.getState()[field], null, `${label} must not be adopted`);
+    assert.equal(app.store.getState().selectedChangeId, "a");
+  }
+});
+
+test("follow-up responses refuse another scenario or a different parent before adoption", async () => {
+  for (const stage of ["accept", "compare", "control"]) {
+    for (const substitution of ["scenario", "parent"]) {
+      const accepted = followUpAcceptedBody();
+      const comparison = followUpComparisonBody();
+      const control = followUpControlBody();
+      if (substitution === "scenario") {
+        ({ accept: accepted, compare: comparison, control })[stage].scenarioId = "c";
+      } else if (stage === "accept") accepted.proposalId = "prop-other";
+      else if (stage === "compare") comparison.acceptedId = "acc-other";
+      else control.runId = "run-other";
+      const app = await appAtControl([
+        () => respond(200, feedbackBody()),
+        () => respond(200, accepted),
+        () => respond(200, comparison),
+        () => respond(200, control),
+      ]);
+      assert.deepEqual(await app.store.requestFeedback(), { ok: true });
+      app.store.setFollowUpExpectation("case-3", "13.00");
+      app.store.confirmFollowUpReview(true);
+      const acceptance = await app.store.acceptFollowUp();
+      if (stage === "accept") {
+        assert.equal(acceptance.ok, false);
+        assert.equal(app.store.getState().followUp.accepted, null);
+        continue;
+      }
+      assert.equal(acceptance.ok, true);
+      const compared = await app.store.compareFollowUp();
+      if (stage === "compare") {
+        assert.equal(compared.ok, false);
+        assert.equal(app.store.getState().followUp.comparison, null);
+        continue;
+      }
+      assert.equal(compared.ok, true);
+      assert.equal((await app.store.runFollowUpControl()).ok, false);
+      assert.equal(app.store.getState().followUp.control, null);
+    }
+  }
+});
+
+test("native labelled selector renders selected identities and refuses selection while pending", async () => {
+  const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  assert.match(html, /<label for="change-selector">Prepared checkout change<\/label>/);
+  assert.match(html, /<select id="change-selector" aria-describedby="change-selection-hint" disabled>/);
+  assert.equal(source.includes("state.session.changes[0]"), false, "rendering must not be hard-coded to the first candidate");
+  assert.equal(source.includes("nodes.changeSelector.disabled = !state.session || Boolean(state.inFlight) || state.proposalPending"), true);
+  assert.equal(source.includes("const change = getSelectedChange(state)"), true);
 });

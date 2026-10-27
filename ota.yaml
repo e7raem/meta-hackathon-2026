@@ -2,7 +2,7 @@ version: 1
 
 project:
   name: meta-change-reviewer-slice-1
-  description: Prepared checkout PR with baseline checks, bounded Muse feedback, original/A/B controls and same-test red-green.
+  description: Two prepared checkout changes with selected baseline checks, bounded Muse feedback, original/A/C and correct B controls.
 
 metadata:
   ota:
@@ -131,6 +131,19 @@ tasks:
       Six actual assertions, three baskets times two versions. This honest limited
       baseline has no voucher-boundary coverage; it is not the witness fixture suite.
 
+  "verify:baseline:c":
+    description: Run the same three ordinary baskets against original and selected proposed change C.
+    requirements:
+      toolchains: [node]
+    command:
+      exe: node
+      args: [--max-old-space-size=128, --test, --test-reporter=tap, checks/baseline-c.test.mjs]
+    effects:
+      network: false
+    notes: |
+      Six assertions for C only. A passing A baseline does not admit C or vice versa.
+      These ordinary cases do not cover mixed/ineligible voucher qualification.
+
   "verify:web":
     description: Check UI validation and flow using injected mock fetch only.
     requirements:
@@ -162,7 +175,7 @@ tasks:
     description: Run the finite offline pricing, UI and controller checks.
     only_on: [macos]
     aggregate:
-      tasks: [verify:pricing, verify:baseline, verify:web, verify:live, verify:delivery]
+      tasks: [verify:pricing, verify:baseline, verify:baseline:c, verify:web, verify:live, verify:delivery]
     notes: |
       Not a live API, browser, exported-test, CI, release or production qualification.
 
@@ -297,7 +310,7 @@ agent:
     Use declared ota run <task> --agent paths and the qualified prerequisites
     in README.md. The full offline aggregate needs the qualified Ota executable
     path and its verified SHA-256; fixture passes are not fresh model evidence.
-    Preserve the written pricing rule, reviewed expectations, original/A/B
+    Preserve the written pricing rule, reviewed expectations, original/A/C and correct B
     controls and identical regression-test bytes. Never weaken a checker or
     turn an intentional faulty-code failure into a claimed pass.
     Model proposals are data, not executable code. Review expected totals
@@ -321,6 +334,7 @@ agent:
     - report:render
     - verify:pricing
     - verify:baseline
+    - verify:baseline:c
     - verify:web
     - verify:live
     - verify:live-mvp

@@ -3,6 +3,7 @@ import test from "node:test";
 import { priceCart as original } from "../pricing/original.ts";
 import { priceCart as changeA } from "../pricing/change-a.ts";
 import { priceCart as changeB } from "../pricing/change-b.ts";
+import { priceCart as changeC } from "../pricing/change-c.ts";
 
 function cart(...entries) {
   return Object.freeze(
@@ -64,4 +65,26 @@ test("change-a: voucher must not itself be percentage-discounted", () => {
 test("change-a: simple non-voucher cases remain unchanged", () => {
   assert.equal(changeA(cart([100, true])), 90);
   assert.equal(changeA(cart([100000, false])), 100000);
+});
+
+test("change-c: only discounted eligible amounts can qualify the voucher", () => {
+  const lines = cart([8000, true], [3000, false]);
+  assert.equal(original(lines), 10200);
+  assert.equal(changeB(lines), 10200);
+  assert.equal(changeC(lines), 9700);
+  assert.equal(changeC([...lines].reverse()), 9700);
+});
+
+test("change-c: an entirely ineligible basket cannot receive a voucher", () => {
+  const lines = cart([12000, false]);
+  assert.equal(original(lines), 12000);
+  assert.equal(changeB(lines), 12000);
+  assert.equal(changeC(lines), 11500);
+});
+
+test("change-c: an eligible qualifying basket still matches the correct B control", () => {
+  const lines = cart([12000, true]);
+  assert.equal(original(lines), 10300);
+  assert.equal(changeB(lines), 10300);
+  assert.equal(changeC(lines), 10300);
 });

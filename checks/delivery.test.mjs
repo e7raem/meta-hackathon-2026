@@ -15,6 +15,11 @@ const cases = [
   { lines: [{ amount: 11000, discountEligible: true }], expectedTotal: 9900 },
   { lines: [{ amount: 20000, discountEligible: true }], expectedTotal: 17500 },
 ];
+const cCases = [
+  { lines: [{ amount: 8000, discountEligible: true }, { amount: 3000, discountEligible: false }], expectedTotal: 10200 },
+  { lines: [{ amount: 12000, discountEligible: false }], expectedTotal: 12000 },
+  { lines: [{ amount: 12000, discountEligible: true }], expectedTotal: 10300 },
+];
 
 function tap({ tests = 2, passed = 0, failed = 2, skipped = 0, cancelled = 0, assertion = true } = {}) {
   let text = "TAP version 13\n";
@@ -23,12 +28,12 @@ function tap({ tests = 2, passed = 0, failed = 2, skipped = 0, cancelled = 0, as
   return `\n${text}1..${tests}\n# tests ${tests}\n# pass ${passed}\n# fail ${failed}\n# skipped ${skipped}\n# cancelled ${cancelled}\n`;
 }
 
-async function owned(operation) {
+async function owned(operation, scenarioId = "a") {
   await mkdir(TEMP, { recursive: true, mode: 0o700 });
   const owner = await mkdtemp(join(TEMP, "owned-"));
   const root = join(owner, "source"), scopeId = "delivery-fixture";
   const runDirectory = join(root, "evidence/live", scopeId);
-  const exportId = randomUUID(), runId = "delivery-run", scenarioId = "a";
+  const exportId = randomUUID(), runId = "delivery-run";
   const sourceHashes = {};
   try {
     await mkdir(root, { mode: 0o700 }); await mkdir(runDirectory, { recursive: true, mode: 0o700 });
@@ -37,7 +42,7 @@ async function owned(operation) {
       await mkdir(dirname(join(root, file)), { recursive: true, mode: 0o700 });
       await writeFile(join(root, file), data, { mode: 0o600, flag: "wx" });
     }
-    const testSource = exportRegression("a", cases), testSha256 = sha(testSource);
+    const testSource = exportRegression(scenarioId, scenarioId === "a" ? cases : cCases), testSha256 = sha(testSource);
     const exported = await persistRegression({ root, runDirectory, scopeId, runId, scenarioId, exportId, source: testSource });
     const verifySources = async () => {
       for (const file of RUNTIME_FILES) assert.equal(sha(await readFile(join(root, file))), sourceHashes[file]);
@@ -100,6 +105,35 @@ test("actual nested declared Ota tasks prove baseline and identical-test red-gre
   });
 });
 
+test("actual selected C baseline and identical three-case test distinguish C from correct B", async () => {
+  const otaExecutable = process.env.OTA_DEMO_TEST_OTA;
+  assert.ok(isAbsolute(otaExecutable ?? ""));
+  assert.equal(sha(await readFile(otaExecutable)), process.env.OTA_DEMO_TEST_OTA_SHA256);
+  const lifecycle = createLifecycle();
+  const c = await fixedRunner(process.execPath, "c", cCases.map((entry) => entry.lines), lifecycle);
+  const b = await fixedRunner(process.execPath, "b", cCases.map((entry) => entry.lines), lifecycle);
+  assert.deepEqual(c.rows.map((r) => r.original.value), [10200, 12000, 10300]);
+  assert.deepEqual(c.rows.map((r) => r.candidate.value), [9700, 11500, 10300]);
+  assert.deepEqual(b.rows.map((r) => r.candidate.value), [10200, 12000, 10300]);
+  await owned(async (input) => {
+    const calls = [];
+    const verification = createPricingVerification({ ...input, lifecycle,
+      execute: async (task, cwd) => {
+        calls.push(task);
+        return runDeclaredVerification({ task, cwd, nodeExecutable: process.execPath, otaExecutable, lifecycle });
+      } });
+    const baseline = await verification.baseline("c");
+    assert.equal(baseline.status, "PASS"); assert.equal(baseline.execution.counts.passed, 6);
+    const proof = await verification.regression({ ...input, expectedTests: 3, expectedFailures: 2 });
+    assert.equal(proof.status, "RED_THEN_GREEN"); assert.equal(proof.sameTest, true);
+    assert.equal(proof.red.counts.failed, 2); assert.equal(proof.red.counts.passed, 1);
+    assert.equal(proof.green.counts.passed, 3);
+    assert.equal(proof.correction.faultySha256, input.sourceHashes["pricing/change-c.ts"]);
+    assert.equal(proof.correction.correctedSha256, input.sourceHashes["pricing/change-b.ts"]);
+    assert.deepEqual(calls, ["verify:baseline:c", "verify:export", "verify:export"]);
+  }, "c");
+});
+
 test("setup failures, skipped checks and interrupted exits cannot establish red-green", async () => {
   for (const result of [
     { exitCode: 1, stdout: tap({ assertion: false }), stderr: "" },
@@ -134,7 +168,7 @@ test("export identity, committed record and frozen bytes are checked before any 
     let calls = 0;
     const verification = createPricingVerification({ ...input, lifecycle: createLifecycle(),
       execute: async () => { calls++; throw new Error("must not execute"); } });
-    for (const changed of [{ runId: "another-run" }, { scopeId: "another-scope" }, { scenarioId: "b" }]) {
+    for (const changed of [{ runId: "another-run" }, { scopeId: "another-scope" }, { scenarioId: "b" }, { scenarioId: "c" }]) {
       const selected = changed.scopeId ? createPricingVerification({ ...input, ...changed, lifecycle: createLifecycle() }) : verification;
       await assert.rejects(() => selected.regression({ ...input, ...changed, expectedTests: 2, expectedFailures: 2 }), /EXPORT_BINDING_CHANGED/);
     }

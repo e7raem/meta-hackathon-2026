@@ -121,13 +121,13 @@ test("released Ota's bare loopback Host is accepted only for GET /health", () =>
 
 async function fixture(overrides = {}, { prepareBaseline = true } = {}) {
   const lines = [{ amount: 10000, discountEligible: true }];
-  const calls = { provider: 0, feedback: [], runner: 0, reservations: 0, baseline: 0, regressions: [], exports: [], retained: [], markers: new Set() };
+  const calls = { provider: 0, feedback: [], runner: 0, reservations: 0, baseline: 0, baselineSelections: [], regressions: [], exports: [], retained: [], markers: new Set() };
   const raw = { status: "completed", error: null, model: "muse-spark-1.3",
     usage: { input_tokens: 1, output_tokens: 1 }, output: [{ type: "message", content: [{ type: "output_text",
       text: JSON.stringify({ cases: [{ lines, expectedTotal: 9000, rationale: "Synthetic boundary case." }] }) }] }] };
-  const controller = createController({ changes: [{ id: "a", title: "Prepared change A",
+  const controller = createController({ changes: ["a", "c"].map((id) => ({ id, title: `Prepared change ${id.toUpperCase()}`,
     originalSource: "neutral original", candidateSource: "neutral proposed", rule: { text: "Independent fixture rule" },
-    originalSha256: "a".repeat(64), candidateSha256: "b".repeat(64), diff: "neutral diff" }],
+    originalSha256: "a".repeat(64), candidateSha256: (id === "a" ? "b" : "c").repeat(64), diff: "neutral diff" })),
   scope, now: () => NOW, nonce: "fixture-nonce",
   baselineCoverage: { label: "Synthetic public ordinary coverage", cases: [] },
   baselineIdentity: "c".repeat(64),
@@ -139,14 +139,15 @@ async function fixture(overrides = {}, { prepareBaseline = true } = {}) {
     return feedbackRaw(packet);
   },
   verification: {
-    baseline: async () => { calls.baseline++; return { status: "PASS", cleanup: { ownedCopiesRemoved: true },
+    baseline: async (id) => { calls.baseline++; calls.baselineSelections.push(id); return { status: "PASS", cleanup: { ownedCopiesRemoved: true },
       execution: { exitCode: 0, counts: { tests: 6, passed: 6, failed: 0, skipped: 0, cancelled: 0 }, stdout: "", stderr: "" } }; },
     regression: async (input) => {
       calls.regressions.push(input);
       return { status: "RED_THEN_GREEN", sameTest: true, testSha256: input.testSha256,
         red: { exitCode: 1, counts: { tests: 1, passed: 0, failed: 1, skipped: 0, cancelled: 0 }, stdout: "", stderr: "" },
         green: { exitCode: 0, counts: { tests: 1, passed: 1, failed: 0, skipped: 0, cancelled: 0 }, stdout: "", stderr: "" },
-        correction: { kind: "PRE_REVIEWED_FIXED", label: "Synthetic reviewed correction", faultySha256: "a".repeat(64), correctedSha256: "b".repeat(64) },
+        correction: { kind: "PRE_REVIEWED_FIXED", label: "Synthetic reviewed correction",
+          faultySha256: (input.scenarioId === "c" ? "c" : "a").repeat(64), correctedSha256: "b".repeat(64) },
         cleanup: { ownedCopiesRemoved: true } };
     },
   },
@@ -222,6 +223,46 @@ test("same-test regression requires a reproduced export and never accepts caller
   assert.equal(f.calls.regressions[0].expectedTests, 1); assert.equal(f.calls.regressions[0].expectedFailures, 1);
   assert.equal(f.calls.provider, 1, "red-green does not make a second model request");
   await assert.rejects(() => f.controller.action("/api/regression", { runId: run.runId, exportId: exported.exportId, requestId: "repeat-regression" }), /REGRESSION_ALREADY_RUN/);
+});
+
+test("C keeps selected baseline, source and scenario binding through export, control, feedback and regression", async () => {
+  const f = await fixture({ runner: async (id, baskets) => ({ rows: baskets.map((lines) => ({
+    original: { value: ruleTotal(lines), error: null },
+    candidate: { value: id === "c" ? 9700 : ruleTotal(lines), error: null },
+  })) }) }, { prepareBaseline: false });
+  f.raw.output[0].content[0].text = JSON.stringify({ cases: [{
+    lines: [{ amount: 8000, discountEligible: true }, { amount: 3000, discountEligible: false }],
+    expectedTotal: 10200, rationale: "Synthetic authored mixed basket, not Muse evidence.",
+  }] });
+  await f.controller.action("/api/baseline", { changeId: "a", requestId: "only-a-baseline" });
+  await assert.rejects(() => f.controller.action("/api/propose", { changeId: "c", requestId: "c-before-baseline" }), /PASSING_BASELINE_REQUIRED/);
+  assert.equal(f.calls.reservations, 0);
+  const baseline = await f.controller.action("/api/baseline", { changeId: "c", requestId: "selected-c-baseline" });
+  assert.equal(baseline.changeId, "c"); assert.equal(baseline.sourceIdentities.candidate, "c".repeat(64));
+  assert.deepEqual(f.calls.baselineSelections, ["a", "c"]);
+  const proposal = await f.controller.action("/api/propose", { changeId: "c", requestId: "c-initial-proposal" });
+  const acceptance = await f.controller.action("/api/accept", { proposalId: proposal.proposalId, reviewed: true,
+    expectations: proposal.cases.map((c) => ({ caseId: c.id, expectedTotal: c.expectedTotal })), requestId: "c-accept-expectations" });
+  const run = await f.controller.action("/api/compare", { acceptedId: acceptance.acceptedId, requestId: "c-compare-prices" });
+  assert.equal(run.status, "REPRODUCED"); assert.equal(run.sourceIdentities.candidate, "c".repeat(64));
+  const exported = await f.controller.action("/api/export", { runId: run.runId, requestId: "c-export-test" });
+  assert.match(exported.testSource, /pricing\/change-c\.ts/); assert.doesNotMatch(exported.testSource, /change-a\.ts/);
+  const proof = await f.controller.action("/api/regression", { runId: run.runId, exportId: exported.exportId, requestId: "c-regression-proof" });
+  assert.equal(f.calls.regressions[0].scenarioId, "c");
+  assert.equal(proof.correction.faultySha256, "c".repeat(64));
+  const control = await f.controller.action("/api/control", { runId: run.runId, requestId: "c-control-b" });
+  assert.equal(control.status, "NO_COUNTEREXAMPLE");
+  const feedback = await f.controller.action("/api/feedback", { runId: run.runId, controlId: control.controlId, requestId: "c-feedback-turn" });
+  assert.equal(f.calls.feedback[0].binding.scenarioId, "c");
+  for (const record of [proposal, acceptance, run, exported, proof, control, feedback, feedback.proposal]) {
+    assert.equal(record.scenarioId, "c");
+  }
+  const session = await f.controller.session();
+  assert.equal(session.callsUsed, 2); assert.equal(session.limit, 6);
+  assert.deepEqual(session.changes.map((c) => c.id), ["a", "c"]);
+  const next = await f.controller.action("/api/propose", { changeId: "a", requestId: "a-after-c-proposal" });
+  assert.equal(next.scenarioId, "a"); assert.equal(next.callsUsed, 3);
+  await assert.rejects(() => f.controller.action("/api/propose", { changeId: "b", requestId: "not-a-scenario" }), /CHANGE_NOT_FOUND/);
 });
 
 test("source-derived rule check rejects unchecked or wrong expectations; corrections are REVIEWER not human identity", async () => {
@@ -615,7 +656,7 @@ test("feedback final-output validator locks exact bound faults, STOP and 1-2 new
   assert.throws(() => feedbackFromResponse(bad, packet), /MODEL_INCOMPLETE/);
   const altered = { ...packet, binding: { ...packet.binding, control: "f".repeat(64) } };
   const selected = { record: { proposalId: packet.binding.proposalId, acceptedCases: packet.acceptedCases },
-    change: { originalSha256: packet.binding.original, candidateSha256: packet.binding.candidate,
+    change: { id: packet.binding.scenarioId, originalSha256: packet.binding.original, candidateSha256: packet.binding.candidate,
       rule: packet.rule, originalSource: packet.originalSource, candidateSource: packet.proposedSource } };
   const rebound = feedbackContext({ run, control, selected, ruleSha256: packet.binding.rule,
     controlSha256: altered.binding.control, provenance: packet.initialProvenance });
@@ -624,6 +665,8 @@ test("feedback final-output validator locks exact bound faults, STOP and 1-2 new
 
 async function checkpointFixture() {
   const f = await fixture(); const { proposal, acceptance, run } = await preparedRun(f);
+  // These are synthetic legacy V1 records, deliberately not the current API shape.
+  delete proposal.scenarioId; delete acceptance.scenarioId; delete run.scenarioId;
   return { version: 1, scopeId: scope.id, recordedAt: new Date(NOW - 1000).toISOString(),
     sourceIdentities: { rule: "d".repeat(64), original: "a".repeat(64), candidate: "b".repeat(64), control: "e".repeat(64) },
     model: { responseId: "resp_synthetic_fixture", recordSha256: "f".repeat(64), createdAt: Math.floor(NOW / 1000) - 2 },

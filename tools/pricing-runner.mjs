@@ -19,12 +19,12 @@ async function main() {
     chunks.push(chunk);
   }
   const input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  if (!input || Object.keys(input).length !== 2 || !["a", "b"].includes(input.changeId)
+  if (!input || Object.keys(input).length !== 2 || !["a", "b", "c"].includes(input.changeId)
     || !Array.isArray(input.cases) || input.cases.length < 1 || input.cases.length > 3
     || !input.cases.every(isCart)) throw new Error("Invalid fixed-runner input");
   const original = await import("../pricing/original.ts");
-  const proposed = input.changeId === "a"
-    ? await import("../pricing/change-a.ts") : await import("../pricing/change-b.ts");
+  const proposed = input.changeId === "a" ? await import("../pricing/change-a.ts")
+    : input.changeId === "c" ? await import("../pricing/change-c.ts") : await import("../pricing/change-b.ts");
   const evaluate = (fn, lines) => {
     try {
       const value = fn(Object.freeze(lines.map((line) => Object.freeze({ ...line }))));

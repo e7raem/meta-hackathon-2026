@@ -43,6 +43,25 @@ add full-price items unchanged. The faulty refactor changes that order.
 
 The correction is supplied and reviewed in advance; Muse does not write the fix.
 
+### Two Prepared Changes
+
+Choose A or C in the local UI. Both use the same written rule and ordinary
+baseline baskets, but each has its own selected code, baseline and evidence chain.
+A is the discount/voucher-order example above. C is another prepared refactor
+which incorrectly lets full-price items qualify a basket for the voucher.
+
+C's authored offline witnesses include GBP80 eligible plus GBP30 full-price:
+the rule gives GBP102, while C gives GBP97. A GBP120 all-ineligible basket must
+stay GBP120, but C gives GBP115. Correct control B matches the rule; C also
+matches B for an eligible GBP120 basket (GBP103). These are engineering fixtures,
+not claimed Muse discoveries. Witnesses, corrected B and test expectations are
+not included in the initial model packet, which contains only the rule and
+selected original/proposed source.
+
+Switching changes clears scenario-specific UI results, never the shared session's
+request count or deadline. The selector is disabled while an operation is pending.
+This is a fixed two-example demo, not arbitrary repository ingestion.
+
 ## Why Muse
 
 Muse does the reasoning work between the business rule and the code: looking for
@@ -72,15 +91,17 @@ cd meta-hackathon-2026
 
 ota validate
 ota run verify:baseline --agent
+ota run verify:baseline:c --agent
 ota run verify:pricing --agent
 ota run verify:web --agent
 ```
 
-These three test tasks cover the baseline, pricing and UI checks without an API key or a Meta request:
+These test tasks cover both selected baselines, pricing and UI checks without an API key or a Meta request:
 
 | Task | What it checks |
 | --- | --- |
 | `verify:baseline` | Six ordinary assertions pass on both original and proposed code. |
+| `verify:baseline:c` | The same six assertions against original and selected C. |
 | `verify:pricing` | Pricing arithmetic and the prepared faulty/correct implementations. |
 | `verify:web` | The browser workflow using mocked responses, including review and error states. |
 

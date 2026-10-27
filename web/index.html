@@ -25,6 +25,13 @@
     <ol class="journey">
       <li class="step" id="stage-change">
         <h2>The code change</h2>
+        <p>
+          <label for="change-selector">Prepared checkout change</label>
+          <select id="change-selector" aria-describedby="change-selection-hint" disabled></select>
+        </p>
+        <p id="change-selection-hint" class="step-hint">
+          Switching clears this review, not the shared session request budget or deadline.
+        </p>
         <h3 id="pr-title" class="pr-title"></h3>
         <p class="rule-summary">10% off eligible items, then one &pound;5 voucher if their discounted subtotal reaches &pound;100; full-price items stay unchanged.</p>
         <p class="step-hint">

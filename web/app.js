@@ -1,7 +1,7 @@
 /*
  * Break This PR — browser module (web/app.js).
  *
- * A developer reviews ONE prepared sample checkout PR in three stages:
+ * A developer selects one of two prepared sample checkout PRs, then reviews it in three stages:
  * the code change (with an actually executed baseline), the breaking
  * basket (Muse-proposed cases reviewed against the written rule before
  * any comparison), and the test to keep (persisted export proven
@@ -30,6 +30,7 @@ export const EXPECTED_TOTAL_MAX = 400000;
 
 const MODES = ["LIVE", "FIXTURE"];
 const ORIGINS = ["LIVE", "FIXTURE"];
+const SCENARIO_IDS = ["a", "c"];
 const LOCAL_EXECUTION = "LOCAL_EXECUTION";
 const COMPARISON_STATUSES = ["REPRODUCED", "NO_COUNTEREXAMPLE", "INCONCLUSIVE"];
 const BASELINE_STATUSES = ["PASS", "FAIL", "INCONCLUSIVE"];
@@ -73,6 +74,16 @@ function fail(error) {
 }
 
 const OK = Object.freeze({ ok: true, error: null });
+
+function validScenario(data, retainedA = false) {
+  return retainedA
+    ? data.scenarioId === undefined || data.scenarioId === "a"
+    : SCENARIO_IDS.includes(data.scenarioId);
+}
+
+export function getSelectedChange(state) {
+  return state.session?.changes.find((change) => change.id === state.selectedChangeId) ?? null;
+}
 
 export function isValidExpectedTotal(value) {
   return isIntegerIn(value, EXPECTED_TOTAL_MIN, EXPECTED_TOTAL_MAX);
@@ -199,24 +210,29 @@ export function validateSession(data) {
   if (!isIntegerIn(data.limit, 1, 6)) return fail("session limit must be an integer from 1 to 6");
   if (data.callsUsed > data.limit) return fail("session consumption cannot exceed its request limit");
   if (!textOk(data.deadline, 100)) return fail("session deadline must be a non-empty string");
-  if (!Array.isArray(data.changes) || data.changes.length !== 1) {
-    return fail("session must contain exactly the one prepared change");
+  if (!Array.isArray(data.changes) || data.changes.length !== 2) {
+    return fail("session must contain exactly the two prepared changes a and c");
   }
-  const change = data.changes[0];
-  if (!isPlainObject(change)) return fail("the prepared change must be an object");
-  if (change.id !== "a") return fail('the prepared change id must be "a"');
-  if (!textOk(change.title, 300)) return fail("change title must be a bounded non-empty string");
-  if (!isPlainObject(change.rule)) return fail("change rule must be an object");
-  if (!textOk(change.rule.id, 100)) return fail("rule id must be a non-empty string");
-  if (!textOk(change.rule.title, 300)) return fail("rule title must be a bounded non-empty string");
-  if (!textOk(change.rule.text, 8000)) return fail("rule text must be a bounded non-empty string");
-  if (!textOk(change.rule.domain, 2000)) return fail("rule domain must be a bounded non-empty string");
-  if (!textOk(change.diff, 16000)) return fail("change diff must be a bounded non-empty string");
-  if (typeof change.originalSha256 !== "string" || !SHA256_PATTERN.test(change.originalSha256)) {
-    return fail("originalSha256 must be 64 lowercase hex characters");
-  }
-  if (typeof change.candidateSha256 !== "string" || !SHA256_PATTERN.test(change.candidateSha256)) {
-    return fail("candidateSha256 must be 64 lowercase hex characters");
+  const changeIds = new Set();
+  for (const change of data.changes) {
+    if (!isPlainObject(change)) return fail("the prepared change must be an object");
+    if (!SCENARIO_IDS.includes(change.id) || changeIds.has(change.id)) {
+      return fail("prepared changes must have unique ids a and c");
+    }
+    changeIds.add(change.id);
+    if (!textOk(change.title, 300)) return fail("change title must be a bounded non-empty string");
+    if (!isPlainObject(change.rule)) return fail("change rule must be an object");
+    if (!textOk(change.rule.id, 100)) return fail("rule id must be a non-empty string");
+    if (!textOk(change.rule.title, 300)) return fail("rule title must be a bounded non-empty string");
+    if (!textOk(change.rule.text, 8000)) return fail("rule text must be a bounded non-empty string");
+    if (!textOk(change.rule.domain, 2000)) return fail("rule domain must be a bounded non-empty string");
+    if (!textOk(change.diff, 16000)) return fail("change diff must be a bounded non-empty string");
+    if (typeof change.originalSha256 !== "string" || !SHA256_PATTERN.test(change.originalSha256)) {
+      return fail("originalSha256 must be 64 lowercase hex characters");
+    }
+    if (typeof change.candidateSha256 !== "string" || !SHA256_PATTERN.test(change.candidateSha256)) {
+      return fail("candidateSha256 must be 64 lowercase hex characters");
+    }
   }
   const coverage = validateCoverage(data.baselineCoverage);
   if (!coverage.ok) return coverage;
@@ -229,8 +245,9 @@ export function validateSession(data) {
   return validateRetainedInitial(data.retainedInitial);
 }
 
-export function validateProposal(data) {
+export function validateProposal(data, { retainedA = false } = {}) {
   if (!isPlainObject(data)) return fail("proposal payload must be an object");
+  if (!validScenario(data, retainedA)) return fail("proposal scenarioId must identify its prepared scenario");
   if (data.kind !== "proposal") return fail('proposal kind must be "proposal"');
   if (!ORIGINS.includes(data.origin)) return fail("proposal origin must be literal LIVE or FIXTURE");
   if (!textOk(data.proposalId, 200)) return fail("proposalId must be a non-empty string");
@@ -258,8 +275,9 @@ export function formatTokenUsage(value) {
   return value === null ? "UNKNOWN" : String(value);
 }
 
-export function validateAccepted(data) {
+export function validateAccepted(data, { retainedA = false } = {}) {
   if (!isPlainObject(data)) return fail("acceptance payload must be an object");
+  if (!validScenario(data, retainedA)) return fail("acceptance scenarioId must identify its prepared scenario");
   if (data.kind !== "accepted") return fail('acceptance kind must be "accepted"');
   if (!ORIGINS.includes(data.origin)) return fail("acceptance origin must be literal LIVE or FIXTURE");
   if (!textOk(data.acceptedId, 200)) return fail("acceptedId must be a non-empty string");
@@ -327,8 +345,9 @@ function validateComparisonRows(rows) {
   return OK;
 }
 
-export function validateComparison(data) {
+export function validateComparison(data, { retainedA = false } = {}) {
   if (!isPlainObject(data)) return fail("comparison payload must be an object");
+  if (!validScenario(data, retainedA)) return fail("comparison scenarioId must identify its prepared scenario");
   if (data.kind !== "comparison") return fail('comparison kind must be "comparison"');
   if (!ORIGINS.includes(data.origin)) return fail("comparison origin must be literal LIVE or FIXTURE");
   if (!textOk(data.runId, 200)) return fail("comparison runId must be a non-empty string");
@@ -362,7 +381,7 @@ export function validateExport(data) {
   if (data.filename !== EXPORT_FILENAME) {
     return fail(`export filename must be exactly ${EXPORT_FILENAME}`);
   }
-  if (!EXPORT_ID_PATTERN.test(data.exportId) || !textOk(data.runId, 200) || data.scenarioId !== "a") {
+  if (!EXPORT_ID_PATTERN.test(data.exportId) || !textOk(data.runId, 200) || !SCENARIO_IDS.includes(data.scenarioId)) {
     return fail("export must identify its export, run and prepared scenario");
   }
   if (typeof data.path !== "string" || data.path.match(EXPORT_PATH_PATTERN)?.[1] !== data.exportId) {
@@ -384,7 +403,7 @@ export function validateBaseline(data) {
   if (!isPlainObject(data)) return fail("baseline payload must be an object");
   if (data.kind !== "baseline") return fail('baseline kind must be "baseline"');
   if (data.origin !== LOCAL_EXECUTION) return fail("baseline origin must be LOCAL_EXECUTION");
-  if (data.changeId !== "a") return fail('baseline changeId must be "a"');
+  if (!SCENARIO_IDS.includes(data.changeId)) return fail("baseline changeId must be a or c");
   if (!BASELINE_STATUSES.includes(data.status)) {
     return fail("baseline status must be PASS, FAIL or INCONCLUSIVE");
   }
@@ -422,7 +441,7 @@ export function validateRegression(data) {
   if (data.kind !== "regression") return fail('regression kind must be "regression"');
   if (data.origin !== LOCAL_EXECUTION) return fail("regression origin must be LOCAL_EXECUTION");
   if (!textOk(data.runId, 200)) return fail("regression runId must be a non-empty string");
-  if (!EXPORT_ID_PATTERN.test(data.exportId) || data.scenarioId !== "a") {
+  if (!EXPORT_ID_PATTERN.test(data.exportId) || !SCENARIO_IDS.includes(data.scenarioId)) {
     return fail("regression must identify its export and prepared scenario");
   }
   if (!REGRESSION_STATUSES.includes(data.status)) {
@@ -473,6 +492,7 @@ export function validateRegression(data) {
  */
 export function validateControl(data) {
   if (!isPlainObject(data)) return fail("control payload must be an object");
+  if (!validScenario(data)) return fail("control scenarioId must identify its prepared scenario");
   if (data.kind !== "control") return fail('control kind must be "control"');
   if (data.origin !== LOCAL_EXECUTION) return fail("control origin must be LOCAL_EXECUTION");
   if (!textOk(data.controlId, 200)) return fail("control controlId must be a non-empty string");
@@ -509,6 +529,7 @@ export function validateControl(data) {
  */
 export function validateFeedback(data) {
   if (!isPlainObject(data)) return fail("feedback payload must be an object");
+  if (!validScenario(data)) return fail("feedback scenarioId must identify its prepared scenario");
   if (data.kind !== "feedback") return fail('feedback kind must be "feedback"');
   if (!ORIGINS.includes(data.origin)) return fail("feedback origin must be literal LIVE or FIXTURE");
   if (!textOk(data.feedbackId, 200)) return fail("feedback feedbackId must be a non-empty string");
@@ -529,7 +550,8 @@ export function validateFeedback(data) {
     if (data.proposal.cases.length > 2) {
       return fail("feedback follow-up must propose 1 or 2 cases");
     }
-    if (data.proposal.origin !== data.origin || data.proposal.callsUsed !== data.callsUsed) {
+    if (data.proposal.origin !== data.origin || data.proposal.callsUsed !== data.callsUsed
+      || data.proposal.scenarioId !== data.scenarioId) {
       return fail("feedback proposal provenance or usage count does not match feedback");
     }
   } else if (data.proposal !== null) {
@@ -559,11 +581,11 @@ export function validateFeedback(data) {
  */
 export function validateRetainedInitial(data) {
   if (!isPlainObject(data)) return fail("retainedInitial must be an object");
-  const proposal = validateProposal(data.proposal);
+  const proposal = validateProposal(data.proposal, { retainedA: true });
   if (!proposal.ok) return fail(`retained proposal: ${proposal.error}`);
-  const accepted = validateAccepted(data.accepted);
+  const accepted = validateAccepted(data.accepted, { retainedA: true });
   if (!accepted.ok) return fail(`retained acceptance: ${accepted.error}`);
-  const comparison = validateComparison(data.comparison);
+  const comparison = validateComparison(data.comparison, { retainedA: true });
   if (!comparison.ok) return fail(`retained comparison: ${comparison.error}`);
   if (data.accepted.proposalId !== data.proposal.proposalId) {
     return fail("retained acceptance does not reference the retained proposal");
@@ -665,13 +687,15 @@ export function createApiClient({ fetchImpl, randomId }) {
       const data = await requestJson(API_PATHS.session, { method: "GET" });
       return ensure(validateSession(data), data);
     },
-    async baseline({ csrfToken }) {
+    async baseline({ csrfToken, changeId }) {
       const data = await requestJson(API_PATHS.baseline, {
         method: "POST",
         csrfToken,
-        body: { changeId: "a" },
+        body: { changeId },
       });
-      return ensure(validateBaseline(data), data);
+      ensure(validateBaseline(data), data);
+      if (data.changeId !== changeId) throw apiError("invalid_shape", "baseline echoed a different changeId");
+      return data;
     },
     async propose({ csrfToken, changeId }) {
       const data = await requestJson(API_PATHS.propose, {
@@ -679,7 +703,9 @@ export function createApiClient({ fetchImpl, randomId }) {
         csrfToken,
         body: { changeId },
       });
-      return ensure(validateProposal(data), data);
+      ensure(validateProposal(data), data);
+      if (data.scenarioId !== changeId) throw apiError("invalid_shape", "proposal echoed a different scenarioId");
+      return data;
     },
     async accept({ csrfToken, proposalId, expectations }) {
       const data = await requestJson(API_PATHS.accept, {
@@ -766,6 +792,8 @@ function blankErrors() {
 export function initialState() {
   return {
     session: null,
+    selectedChangeId: "a",
+    retainedSuppressed: false,
     budgetKnown: false,
     proposalPending: false,
     baseline: null,
@@ -815,7 +843,17 @@ export function createStore({ client }) {
   }
 
   function retainedInitial() {
-    return state.session && state.session.retainedInitial ? state.session.retainedInitial : null;
+    return state.selectedChangeId === "a" && !state.retainedSuppressed
+      ? state.session?.retainedInitial ?? null : null;
+  }
+
+  function assertFreshRecord(record, parentKey, parentId) {
+    if (record.scenarioId !== state.selectedChangeId) {
+      throw apiError("invalid_shape", "response scenarioId differs from the selected change");
+    }
+    if (parentKey && record[parentKey] !== parentId) {
+      throw apiError("invalid_shape", `response ${parentKey} differs from its reviewed parent`);
+    }
   }
 
   // Root records: retained initial evidence when the session carries it,
@@ -912,11 +950,30 @@ export function createStore({ client }) {
       return () => listeners.delete(listener);
     },
 
+    selectChange(changeId) {
+      if (!state.session) return { ok: false, reason: "no_session" };
+      const busy = guardBusy();
+      if (busy) return busy;
+      if (!state.session.changes.some((change) => change.id === changeId)) {
+        return { ok: false, reason: "unknown_change" };
+      }
+      if (changeId === state.selectedChangeId) return { ok: true };
+      const { session, budgetKnown, feedbackAttempted, epoch } = state;
+      state = {
+        ...initialState(), session, budgetKnown, feedbackAttempted,
+        selectedChangeId: changeId, retainedSuppressed: true, epoch: epoch + 1,
+      };
+      notify();
+      return { ok: true };
+    },
+
     async loadSession() {
       const busy = guardBusy();
       if (busy) return busy;
       const epoch = state.epoch + 1;
       const priorFeedbackAttempted = state.feedbackAttempted;
+      const priorSelectedChangeId = state.selectedChangeId;
+      const priorRetainedSuppressed = state.retainedSuppressed;
       state.epoch = epoch;
       state.inFlight = "session";
       state.errors.session = null;
@@ -927,6 +984,8 @@ export function createStore({ client }) {
         state = initialState();
         state.epoch = epoch;
         state.session = session;
+        state.selectedChangeId = priorSelectedChangeId;
+        state.retainedSuppressed = priorRetainedSuppressed;
         state.budgetKnown = true;
         state.feedbackAttempted = priorFeedbackAttempted || session.feedbackAttempted === true;
         notify();
@@ -983,8 +1042,13 @@ export function createStore({ client }) {
       state.errors.baseline = null;
       notify();
       try {
-        const baseline = await client.baseline({ csrfToken: state.session.csrfToken });
+        const baseline = await client.baseline({
+          csrfToken: state.session.csrfToken, changeId: state.selectedChangeId,
+        });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
+        if (baseline.changeId !== state.selectedChangeId) {
+          throw apiError("invalid_shape", "baseline changeId differs from the selected change");
+        }
         state.inFlight = null;
         state.baseline = baseline;
         notify();
@@ -1002,7 +1066,8 @@ export function createStore({ client }) {
     async propose() {
       if (!state.session) return { ok: false, reason: "not_ready" };
       if (retainedInitial()) return { ok: false, reason: "retained_initial" };
-      if (!state.baseline || state.baseline.status !== "PASS") {
+      if (!state.baseline || state.baseline.status !== "PASS"
+        || state.baseline.changeId !== state.selectedChangeId) {
         return { ok: false, reason: "baseline_required" };
       }
       if (state.proposal) return { ok: false, reason: "already_proposed" };
@@ -1019,14 +1084,17 @@ export function createStore({ client }) {
       try {
         const proposal = await client.propose({
           csrfToken: state.session.csrfToken,
-          changeId: "a",
+          changeId: state.selectedChangeId,
         });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
+        assertFreshRecord(proposal);
         if (proposal.callsUsed <= state.session.callsUsed || proposal.callsUsed > state.session.limit) {
           throw apiError("invalid_shape", "proposal did not confirm a new durable budget reservation");
         }
         state.inFlight = null;
         state.proposal = proposal;
+        // A newly reserved server-issued proposal is a new root, not a retry of the prior root's feedback.
+        state.feedbackAttempted = false;
         state.session.callsUsed = proposal.callsUsed;
         state.budgetKnown = true;
         state.expectations = {};
@@ -1105,6 +1173,7 @@ export function createStore({ client }) {
           })),
         });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
+        assertFreshRecord(accepted, "proposalId", state.proposal.proposalId);
         state.inFlight = null;
         const mismatch = checkAcceptanceEcho(accepted, state.expectations);
         if (mismatch) {
@@ -1141,6 +1210,7 @@ export function createStore({ client }) {
           acceptedId: state.accepted.acceptedId,
         });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
+        assertFreshRecord(comparison, "acceptedId", state.accepted.acceptedId);
         state.inFlight = null;
         const mismatch = checkComparisonEcho(comparison, state.accepted.acceptedCases);
         if (mismatch) {
@@ -1180,6 +1250,7 @@ export function createStore({ client }) {
           runId: comparison.runId,
         });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
+        assertFreshRecord(exported, "runId", comparison.runId);
         state.inFlight = null;
         state.exportResult = exported;
         notify();
@@ -1211,6 +1282,10 @@ export function createStore({ client }) {
           scenarioId: state.exportResult.scenarioId,
         });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
+        assertFreshRecord(regression, "runId", rootComparison().runId);
+        if (regression.exportId !== state.exportResult.exportId) {
+          throw apiError("invalid_shape", "regression exportId differs from the retained export");
+        }
         state.inFlight = null;
         if (regression.status === "RED_THEN_GREEN") {
           const problem = checkRegressionEvidence(regression);
@@ -1263,6 +1338,7 @@ export function createStore({ client }) {
           runId: comparison.runId,
         });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
+        assertFreshRecord(control, "runId", comparison.runId);
         state.inFlight = null;
         const acceptedRecord = rootAccepted();
         const mismatch = control.acceptedId !== acceptedRecord.acceptedId
@@ -1318,6 +1394,11 @@ export function createStore({ client }) {
           controlId: state.control.controlId,
         });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
+        assertFreshRecord(feedback, "runId", state.control.runId);
+        if (feedback.controlId !== state.control.controlId
+          || (feedback.proposal && feedback.proposal.scenarioId !== state.selectedChangeId)) {
+          throw apiError("invalid_shape", "feedback differs from its selected control ancestry");
+        }
         if (feedback.origin !== state.session.mode) throw apiError("invalid_shape", "feedback origin differs from session mode");
         if (feedback.callsUsed <= state.session.callsUsed || feedback.callsUsed > state.session.limit) {
           throw apiError("invalid_shape", "feedback did not confirm a new durable budget reservation");
@@ -1408,6 +1489,7 @@ export function createStore({ client }) {
           })),
         });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
+        assertFreshRecord(accepted, "proposalId", state.followUp.proposal.proposalId);
         state.inFlight = null;
         const mismatch = checkAcceptanceEcho(accepted, state.followUp.expectations);
         if (mismatch) {
@@ -1444,6 +1526,7 @@ export function createStore({ client }) {
           acceptedId: state.followUp.accepted.acceptedId,
         });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
+        assertFreshRecord(comparison, "acceptedId", state.followUp.accepted.acceptedId);
         state.inFlight = null;
         const mismatch = checkComparisonEcho(comparison, state.followUp.accepted.acceptedCases);
         if (mismatch) {
@@ -1482,6 +1565,7 @@ export function createStore({ client }) {
           runId: state.followUp.comparison.runId,
         });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
+        assertFreshRecord(control, "runId", state.followUp.comparison.runId);
         state.inFlight = null;
         const mismatch = control.acceptedId !== state.followUp.accepted.acceptedId
           ? "control echoed a different acceptedId than the reviewed acceptance"
@@ -1612,6 +1696,7 @@ function startBrowserApp() {
     modeBadge: byId("mode-badge"),
     sessionMeta: byId("session-meta"),
     sessionError: byId("session-error"),
+    changeSelector: byId("change-selector"),
     prTitle: byId("pr-title"),
     changePanel: byId("change-panel"),
     baselineButton: byId("baseline-button"),
@@ -1706,13 +1791,20 @@ function startBrowserApp() {
   }
 
   function renderChange(state) {
-    const token = state.session ? state.session.csrfToken : null;
+    nodes.changeSelector.disabled = !state.session || Boolean(state.inFlight) || state.proposalPending;
+    const token = state.session ? `${state.session.csrfToken}:${state.selectedChangeId}` : null;
     if (token === renderedSessionToken) return;
     renderedSessionToken = token;
+    clear(nodes.changeSelector);
     clear(nodes.changePanel);
-    nodes.prTitle.textContent = state.session ? state.session.changes[0].title : "";
+    const change = getSelectedChange(state);
+    nodes.prTitle.textContent = change?.title ?? "";
     if (!state.session) return;
-    const change = state.session.changes[0];
+    for (const entry of state.session.changes) {
+      nodes.changeSelector.append(el("option", { value: entry.id }, entry.title));
+    }
+    nodes.changeSelector.value = state.selectedChangeId;
+    if (!change) return;
     const coverage = state.session.baselineCoverage;
     const coverageList = el("ul", { class: "coverage-list" });
     for (const entry of coverage.cases) {
@@ -1802,7 +1894,8 @@ function startBrowserApp() {
   }
 
   function retainedOf(state) {
-    return state.session && state.session.retainedInitial ? state.session.retainedInitial : null;
+    return state.selectedChangeId === "a" && !state.retainedSuppressed
+      ? state.session?.retainedInitial ?? null : null;
   }
 
   function renderProposal(state) {
@@ -2416,6 +2509,10 @@ function startBrowserApp() {
     renderFollowUp(state);
   }
 
+  nodes.changeSelector.addEventListener("change", () => {
+    store.selectChange(nodes.changeSelector.value);
+    nodes.changeSelector.value = store.getState().selectedChangeId;
+  });
   nodes.baselineButton.addEventListener("click", () => {
     store.runBaseline();
   });
