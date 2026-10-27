@@ -85,6 +85,35 @@ a fresh two-request live demonstration. Prior runtime evidence never automatical
 qualifies the new feedback implementation. Existing root regression selection
 remains separate from follow-up exploration.
 
+## Observed Feedback Walkthrough
+
+On 27 October 2026, MUSE operated frozen R5 runtime source
+`8b6b52682a2ac60a23d3dc6e8cc295cfd5a74d6c`. This deliberately continued the
+**retained initial live cases**, rather than claiming a fresh initial discovery.
+The selected new results are supported by retained execution/model records:
+
+- A fresh baseline passed all six assertions. A fresh original/B control returned
+  `NO_COUNTEREXAMPLE`: the two retained baskets matched GBP90 and GBP175 on both
+  original and the pre-reviewed correct refactor. This is selected-case evidence,
+  not whole-PR approval or a measured false-positive rate.
+- One real Muse feedback request used 1706 input / 1941 output tokens. It explained
+  the observed pre-discount voucher threshold and discount-after-voucher fault,
+  then chose **STOP** with no new cases. No follow-up-case live execution occurred.
+- A fresh export retained the same test SHA-256
+  `61f707ad9ca28df195d18203cf4cbc454a39ec97ff0d262f18b67e5ee0803082`.
+  Fresh declared native verification returned red: exit1/two assertion failures;
+  green: exit0/two passes, no skips/cancellations, same test bytes. The correction
+  remained pre-reviewed, not Muse-generated. The retained proof reports owned-copy
+  cleanup; independent reconciliation is still pending.
+
+The timestamped browser capture spans **135.915 seconds / 19 frames**. MUSE
+observed document width equal to scrollWidth at actual 530px, 375px and 1265px
+viewports, with narrow code scrolling internally. These are MUSE's browser
+observations, not a second independent DOM review. Narrated video editing,
+full source/budget reconciliation and independent live-evidence review remain
+pending. The capture is not a finished voiced submission film. All six requests
+are consumed; no further provider call is available or authorized.
+
 ## Prior Full-Flow Rehearsal (Before Feedback)
 
 On 27 October 2026, the selected local flow on frozen runtime source
@@ -162,9 +191,10 @@ is relabelled as this source's passing-baseline/red-green proof.
 
 `META_DEMO_APPROVAL_FILE` names a private owner approval binding source, Node and
 released Ota identities, saved key path, deadline and six-total request ledger.
-It contains no key. The rehearsal retained four historical reservations and used
-one more: five of six are consumed, with one request remaining. MUSE alone owns explicit
-deadline renewal/migration with immutable old history and unchanged counters.
+It contains no key. The original rehearsal retained four historical reservations
+and consumed the fifth; the R5 feedback used the sixth. **All six are consumed,
+with no request remaining.** Migration/cleanup remain operator-owned; preserve
+immutable history and the established counter rather than resetting either.
 The app has no renewal/reset endpoint and normal startup never initializes state.
 No command or agent-safe declaration here grants service/provider authority.
 The feedback addition does not renew that window or expand the remaining allowance.
