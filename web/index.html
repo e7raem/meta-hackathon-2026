@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pricing Change Reviewer</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main id="app">
+    <header class="masthead">
+      <p class="kicker">Pricing regression review</p>
+      <h1>Check a pricing change before you trust it</h1>
+      <p class="lede">
+        Pick a prepared change, let Muse propose verification cases, confirm the
+        expected totals against the written rule, then compare the original and
+        candidate implementations and export a runnable regression test.
+      </p>
+      <p class="session-line">
+        <span id="mode-badge" class="badge offline">NO SESSION</span>
+        <span id="session-meta" class="session-meta"></span>
+      </p>
+      <p id="session-error" class="status error" role="status" aria-live="polite" hidden></p>
+    </header>
+
+    <ol class="journey">
+      <li class="step" id="step-select">
+        <h2>Select a change</h2>
+        <p class="step-hint">Read the rule and the proposed diff before going further.</p>
+        <div id="change-options" class="change-options" role="radiogroup" aria-label="Prepared changes"></div>
+        <div id="change-detail" class="change-detail"></div>
+      </li>
+
+      <li class="step" id="step-propose">
+        <h2>Ask Muse for verification cases</h2>
+        <p class="step-hint">Muse proposes up to three cases with expected totals. Nothing is executed at this step.</p>
+        <button type="button" id="propose-button" disabled>Propose cases</button>
+        <p id="propose-status" class="status" role="status" aria-live="polite"></p>
+        <div id="proposal-panel" class="panel"></div>
+      </li>
+
+      <li class="step" id="step-validate">
+        <h2>Validate the expectations</h2>
+        <p class="step-hint">
+          Check every expected total against the rule yourself. Edit any value that is wrong,
+          then confirm you reviewed them. Edited values are recorded as reviewer corrections,
+          not as Muse discoveries.
+        </p>
+        <div id="expectation-rows" class="expectation-rows"></div>
+        <p class="review-confirm">
+          <input type="checkbox" id="reviewed-checkbox" disabled>
+          <label for="reviewed-checkbox">I checked each expected total against the written rule.</label>
+        </p>
+        <button type="button" id="accept-button" disabled>Accept expectations</button>
+        <p id="accept-status" class="status" role="status" aria-live="polite"></p>
+        <div id="accepted-panel" class="panel"></div>
+      </li>
+
+      <li class="step" id="step-compare">
+        <h2>Compare original and candidate</h2>
+        <p class="step-hint">The backend runs both implementations against the accepted cases. Expectations are locked first.</p>
+        <button type="button" id="compare-button" disabled>Run comparison</button>
+        <p id="compare-status" class="status" role="status" aria-live="polite"></p>
+        <div id="comparison-panel" class="panel"></div>
+      </li>
+
+      <li class="step" id="step-export">
+        <h2>Export a regression test</h2>
+        <p class="step-hint">The accepted cases become a runnable test so this check can be repeated.</p>
+        <button type="button" id="export-button" disabled>Export regression test</button>
+        <p id="export-status" class="status" role="status" aria-live="polite"></p>
+        <div id="export-panel" class="panel"></div>
+      </li>
+    </ol>
+
+    <footer class="endnote">
+      <p>
+        This reviewer shows what the backend reports for the selected cases only.
+        A green comparison is evidence for those cases, not proof the change is
+        correct for every basket, and it does not approve any merge or deployment.
+      </p>
+    </footer>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

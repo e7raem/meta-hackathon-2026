@@ -1,4 +1,70 @@
-# Change reviewer: static evidence card
+# Pricing-regression reproducer and historical checkout card
+
+## Current local LIVE candidate
+
+The new candidate selects one of two prepared pricing refactors. Muse proposes
+structured cases against an independent written rule. A reviewer must validate
+or correct expected totals before either implementation's outcomes are exposed.
+Only then does a fixed audited runner compare the original and selected change.
+The baseline is not the specification. Comparison reports `REPRODUCED`,
+`NO_COUNTEREXAMPLE`, or `INCONCLUSIVE`, never universal correctness.
+
+The rule discounts eligible lines first, applies one voucher only when their
+post-discount subtotal qualifies, then includes unchanged ineligible lines.
+`pricing/rule.json` is authoritative. Prepared domain: 1-4 lines, integer amounts
+100..100000 in multiples of 100, explicit boolean eligibility; no tax, currency
+conversion, payment integration or arbitrary repository/code execution.
+
+This source is **NOT YET LIVE-QUALIFIED**. Source authoring and offline fixtures
+do not establish real provider, browser or exported-test outcomes. The historical
+checkout results below do not qualify this different pricing scenario. Authored
+pricing controls include deliberate regression witnesses: their green fixture
+suite is not evidence that an existing customer suite missed those defects.
+
+Existing released Ota v1.6.28 and exactly Node v24.22.1 are required; the contract
+diagnoses instead of installing anything. After source/admission review:
+
+```text
+ota validate
+ota run verify:live-mvp --agent --dry-run
+ota run verify:live-mvp --agent
+```
+
+That finite aggregate runs offline pricing controls, mocked-fetch UI tests and
+synthetic controller/budget/export tests. It starts no server and makes no Meta
+request. Controller tests create only owned temporary paths under
+`evidence/live-tests/`. There are no dependencies to install or hidden setup tasks.
+
+The service path requires separate frozen-source and operational clearance.
+`META_DEMO_APPROVAL_FILE` names an owner-private approval binding source/Node
+identities, the saved key path, deadline and six additional calls. It contains
+no key. Private directories must exist first; the operator initializes the budget
+once via `ota run demo:live:budget --agent`, then starts
+`ota run demo:live --agent`. Neither command is authorized merely by reading
+this README or by inclusion in `agent.safe_tasks`. First qualification is macOS
+only. No automatic retry, reset, provider fallback, paid top-up or repair occurs.
+
+The listener binds only `127.0.0.1:48761`; a busy port refuses. The provider key
+stays in the trusted HTTPS server, never the browser or pricing child. That child
+receives a fixed credential-free environment and bounded time/output; it is not
+an OS sandbox. Exact origin/nonce checks mitigate browser cross-origin requests,
+not a malicious local same-user process. Reviewer acceptance/correction is an
+operator declaration, not verified human identity. Ota effects are declarations,
+not a claim of universal network/process containment.
+
+Successful export persists `evidence/regression.test.mjs`, returns its hash and
+`ota run verify:export --agent`. Check that hash before executing; the optional
+download is only a copy. The test uses a fixed audited template and numeric/
+boolean data, not model-authored code. A reproduced candidate regression should
+fail its candidate assertion; do not turn that failure green by changing the rule.
+Missing export or execution errors are not a successful regression proof.
+
+`LIVE` denotes actual provider-origin data, not correctness; `FIXTURE` and
+historical `RECORDED` remain distinct. No new Meta request, live service or browser
+qualification is established by this source-only candidate. No CI, deployment,
+production payment safety, general agent containment or automatic merge follows.
+
+## Historical static evidence card
 
 A **SEEDED synthetic checkout refactor**, not a discovered customer defect or
 hosted product. The checked-in `src/checkout.ts` deliberately remains BAD:

@@ -2,7 +2,7 @@ version: 1
 
 project:
   name: meta-change-reviewer-slice-1
-  description: Seeded checkout change review with a static maintainer-projection evidence card.
+  description: Local pricing-regression reproducer with independently reviewed expectations; historical checkout card retained.
 
 metadata:
   ota:
@@ -13,9 +13,40 @@ execution:
   supported:
     - native
 
+toolchains:
+  node:
+    version: "=24.22.1"
+    fulfillment:
+      mode: none
+
+env:
+  vars:
+    META_DEMO_APPROVAL_FILE:
+      required: false
+
+surfaces:
+  pricing:
+    kind: http
+    label: Local pricing-regression reproducer
+    purpose: Review proposed expectations before executing the fixed pricing comparison.
+    visibility: internal
+    port: 48761
+    path: /
+    readiness:
+      kind: http
+      method: GET
+      path: /health
+      success:
+        status: [200]
+      interval: 1s
+      timeout: 2s
+      retries: 5
+
 tasks:
   "verify:shallow":
     description: Run the original all-eligible smoke checks.
+    requirements:
+      toolchains: [node]
     command:
       exe: node
       args:
@@ -23,6 +54,11 @@ tasks:
 
   "verify:semantic":
     description: Run the frozen accepted semantic checker against the current source.
+    requirements:
+      toolchains: [node]
+    notes: |
+      Historical seeded BAD source intentionally fails this task. It is not the
+      live pricing MVP's verification entrypoint; never weaken the checker.
     command:
       exe: node
       args:
@@ -30,6 +66,8 @@ tasks:
 
   "verify:report":
     description: Test the static evidence renderer using isolated fixture-owned evidence paths.
+    requirements:
+      toolchains: [node]
     command:
       exe: node
       args:
@@ -41,6 +79,8 @@ tasks:
 
   "report:render":
     description: Render only evidence/review.json to the static evidence/report.html card.
+    requirements:
+      toolchains: [node]
     command:
       exe: node
       args:
@@ -48,6 +88,127 @@ tasks:
     effects:
       writes:
         - evidence/
+
+  "verify:pricing":
+    description: Check the written pricing rule and prepared original/change controls offline.
+    requirements:
+      toolchains: [node]
+    command:
+      exe: node
+      args: [--test, checks/pricing.test.mjs]
+    effects:
+      network: false
+    notes: |
+      Deterministic authored controls, not model-generated or customer evidence.
+      The independent written rule is the oracle, never baseline behaviour alone.
+
+  "verify:web":
+    description: Check UI validation and flow using injected mock fetch only.
+    requirements:
+      toolchains: [node]
+    command:
+      exe: node
+      args: [--test, checks/web-flow.test.mjs]
+    effects:
+      network: false
+    notes: |
+      No listener, browser, provider request, credential, or DOM screenshot proof.
+
+  "verify:live":
+    description: Check the live controller, durable budget and export persistence offline.
+    only_on: [macos]
+    requirements:
+      toolchains: [node]
+    command:
+      exe: node
+      args: [--test, checks/live-demo.test.mjs]
+    effects:
+      writes: [evidence/live-tests/]
+      network: false
+    notes: |
+      Synthetic providers/runners/reviewer declarations only. Tests own and remove
+      unique temporary directories; they do not initialize the operational budget.
+
+  "verify:live-mvp":
+    description: Run the finite offline pricing, UI and controller checks.
+    only_on: [macos]
+    aggregate:
+      tasks: [verify:pricing, verify:web, verify:live]
+    notes: |
+      Not a live API, browser, exported-test, CI, release or production qualification.
+
+  "verify:export":
+    description: Run the exact persisted regression test against the selected prepared change.
+    requirements:
+      toolchains: [node]
+    command:
+      exe: node
+      args: [--test, evidence/regression.test.mjs]
+    effects:
+      network: false
+    notes: |
+      Requires an actual persisted export. A reproduced candidate regression
+      intentionally produces a failing assertion; missing export is not a pass.
+      Recheck the export hash before running. No model-produced executable code.
+
+  "demo:live:budget":
+    description: Explicitly initialize one approved private six-request budget; refuse existing state.
+    only_on: [macos]
+    requirements:
+      toolchains: [node]
+      env: [META_DEMO_APPROVAL_FILE]
+    command:
+      exe: node
+      args: [tools/live-demo.mjs, --initialize-budget]
+    effects:
+      writes: [evidence/live/]
+      network: false
+    notes: |
+      Separate operator-approved initialization, never an automatic server dependency.
+      Requires the reviewed private approval and pre-created private directories.
+      Existing/corrupt/uncertain state is never reset or silently adopted.
+
+  "demo:live":
+    description: Start the reviewed loopback-only pricing reproducer for one approved window.
+    only_on: [macos]
+    requirements:
+      toolchains: [node]
+      env: [META_DEMO_APPROVAL_FILE]
+    launch:
+      kind: command
+      exe: node
+      args: [tools/live-demo.mjs]
+    runtime:
+      kind: service
+      surfaces:
+        pricing:
+          bind:
+            address: 127.0.0.1
+            port:
+              mode: fixed
+              value: 48761
+          project:
+            host:
+              address: 127.0.0.1
+              port:
+                mode: fixed
+                value: 48761
+              path: /
+              primary: true
+    effects:
+      writes: [evidence/live/, evidence/regression.test.mjs]
+      network: true
+      network_kind: integration_test
+    notes: |
+      Task admission is not live-use approval. Independent frozen-source review
+      and exact operational clearance are required before starting this service.
+      The private approval binds sources, Node, fixed key path, deadline and six
+      additional requests. Durable reservations precede dispatch; failures count.
+      No retry/fallback, top-up, arbitrary code, repair application or deployment.
+      Reviewer declarations are not identity attestation. Prepared audited code
+      runs in a bounded child without the provider credential, not an OS sandbox.
+      The controller persists the export and evidence; browser downloads are copies.
+      Ota declares execution/effects, not comprehensive network or process containment.
 
   "demo:excluded":
     description: Harmless marker-writing task excluded from agent admission.
@@ -65,15 +226,22 @@ tasks:
         - .demo-scratch/
 
 agent:
-  entrypoint: verify:semantic
-  default_task: verify:semantic
+  entrypoint: verify:live-mvp
+  default_task: verify:live-mvp
   safe_tasks:
     - verify:shallow
     - verify:semantic
     - verify:report
     - report:render
+    - verify:pricing
+    - verify:web
+    - verify:live
+    - verify:live-mvp
+    - verify:export
+    - demo:live:budget
+    - demo:live
   verify_after_changes:
-    - verify:semantic
+    - verify:live-mvp
   writable_paths:
     - src/
     - evidence/
@@ -82,3 +250,7 @@ agent:
     - checks/
     - fixtures/
     - tools/report.mjs
+    - tools/live-demo.mjs
+    - tools/pricing-runner.mjs
+    - pricing/
+    - web/
