@@ -433,6 +433,47 @@ pre {
   font-size: 0.9rem;
 }
 
+.retained-banner {
+  margin: 0.8rem 0 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--line);
+  background: var(--amber-wash);
+  color: var(--amber);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+}
+
+.charge-line {
+  margin: 0.3rem 0 0;
+  font-size: 0.85rem;
+}
+
+.charge-line .good { color: var(--green); }
+.charge-line .warn { color: var(--amber); }
+.charge-line .bad { color: var(--red); }
+
+.explanation {
+  margin: 0.8rem 0;
+  padding: 0.6rem 0.9rem;
+  border-left: 3px solid var(--line);
+  background: var(--card);
+  font-style: italic;
+  overflow-wrap: anywhere;
+}
+
+.followup {
+  margin-top: 1.4rem;
+  padding: 0.9rem 0 0.2rem 1rem;
+  border-left: 3px solid var(--line);
+}
+
+.followup h3 {
+  margin: 0 0 0.4rem;
+  font-family: var(--serif);
+  font-size: 1.05rem;
+}
+
 @media (max-width: 40rem) {
   #app {
     padding: 1.5rem 0.9rem 3rem;

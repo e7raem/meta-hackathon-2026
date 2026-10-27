@@ -7,7 +7,8 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { BudgetLedger, initializeBudget, persistRegression, createController, checkRequest,
   buildRunnerEnvironment, exportRegression, ruleTotal, createLifecycle, museProposal, closeProviderRequests,
-  ORIGIN } from "../tools/live-demo.mjs";
+  feedbackContext, feedbackFromResponse, validateRetainedCheckpoint, loadRetainedCheckpoint,
+  createFeedbackAttempts, museFeedback, ORIGIN } from "../tools/live-demo.mjs";
 
 // All providers/runners/reviewer decisions in this file are synthetic offline fixtures.
 const TEMP = fileURLToPath(new URL("../evidence/live-tests/", import.meta.url));
@@ -117,7 +118,7 @@ test("released Ota's bare loopback Host is accepted only for GET /health", () =>
 
 async function fixture(overrides = {}, { prepareBaseline = true } = {}) {
   const lines = [{ amount: 10000, discountEligible: true }];
-  const calls = { provider: 0, runner: 0, reservations: 0, baseline: 0, regressions: [], exports: [], retained: [] };
+  const calls = { provider: 0, feedback: [], runner: 0, reservations: 0, baseline: 0, regressions: [], exports: [], retained: [], markers: new Set() };
   const raw = { status: "completed", error: null, model: "muse-spark-1.3",
     usage: { input_tokens: 1, output_tokens: 1 }, output: [{ type: "message", content: [{ type: "output_text",
       text: JSON.stringify({ cases: [{ lines, expectedTotal: 9000, rationale: "Synthetic boundary case." }] }) }] }] };
@@ -127,6 +128,13 @@ async function fixture(overrides = {}, { prepareBaseline = true } = {}) {
   scope, now: () => NOW, nonce: "fixture-nonce",
   baselineCoverage: { label: "Synthetic public ordinary coverage", cases: [] },
   baselineIdentity: "c".repeat(64),
+  ruleIdentity: "d".repeat(64), controlIdentity: "e".repeat(64),
+  feedbackAttempts: { has: async (root) => calls.markers.has(root),
+    claim: async (root) => { assert.equal(calls.markers.has(root), false); calls.markers.add(root); } },
+  feedbackProvider: async (packet) => {
+    calls.feedback.push(packet);
+    return feedbackRaw(packet);
+  },
   verification: {
     baseline: async () => { calls.baseline++; return { status: "PASS", cleanup: { ownedCopiesRemoved: true },
       execution: { exitCode: 0, counts: { tests: 6, passed: 6, failed: 0, skipped: 0, cancelled: 0 }, stdout: "", stderr: "" } }; },
@@ -146,8 +154,8 @@ async function fixture(overrides = {}, { prepareBaseline = true } = {}) {
     assert.doesNotMatch(JSON.stringify(packet), /private-witness|reference-repair|Authorization|MODEL_API_KEY/);
     return raw;
   },
-  runner: async () => { calls.runner++; return { rows: [{ original: { value: 9000, error: null },
-    candidate: { value: 8550, error: null } }] }; },
+  runner: async (id, baskets) => { calls.runner++; return { rows: baskets.map((lines) => ({ original: { value: ruleTotal(lines), error: null },
+    candidate: { value: id === "b" ? ruleTotal(lines) : 8550, error: null } })) }; },
   verifySources: async () => {}, retain: async (name, value) => calls.retained.push({ name, value }),
   persistExport: async (source) => { calls.exports.push(source); return { sha256: sha(source) }; },
   ...overrides });
@@ -454,3 +462,275 @@ test("a proposal accepts only once; comparison cannot be followed by re-authored
   assert.equal(run.status, "REPRODUCED");
   assert.equal(f.calls.runner, 1);
 });
+
+function feedbackRaw(packet, edit = {}) {
+  return { status: "completed", model: "muse-spark-1.3", error: null,
+    usage: { input_tokens: 20, output_tokens: 30 }, output: [{ type: "message", content: [{ type: "output_text",
+      text: JSON.stringify({ bindingId: packet.bindingId, runId: packet.runId,
+        explanation: "The proposed implementation charges a different total for the observed voucher-boundary basket.",
+        observedFaultCaseIds: packet.initialRows.filter((r) => r.candidate.value !== r.expectedTotal).map((r) => r.caseId),
+        decision: "PROPOSE_CASES", cases: [{ lines: [{ amount: 11000, discountEligible: true }],
+          expectedTotal: 9900, rationale: "An adjacent threshold case, informed by the observed results." }], ...edit }) }] }] };
+}
+
+async function preparedRun(f) {
+  const { proposal, result: acceptance } = await accepted(f.controller);
+  const run = await f.controller.action("/api/compare", { acceptedId: acceptance.acceptedId, requestId: "initial-compare" });
+  const control = await f.controller.action("/api/control", { runId: run.runId, requestId: "initial-control" });
+  return { proposal, acceptance, run, control };
+}
+
+test("feedback follows actual original/A/B execution, durable root claim and reservation; followups require review", async () => {
+  const f = await fixture();
+  const { proposal, acceptance, run, control } = await preparedRun(f);
+  assert.equal(control.status, "NO_COUNTEREXAMPLE"); assert.equal(control.origin, "LOCAL_EXECUTION");
+  assert.equal(control.acceptedId, acceptance.acceptedId);
+  assert.equal(control.sourceIdentities.candidate, "e".repeat(64));
+  const feedback = await f.controller.action("/api/feedback", { runId: run.runId, controlId: control.controlId,
+    requestId: "initial-feedback" });
+  assert.equal(feedback.status, "FOLLOW_UP_PROPOSED");
+  assert.equal(f.calls.markers.has(proposal.proposalId), true);
+  assert.equal(f.calls.reservations, 2); assert.equal(f.calls.feedback.length, 1);
+  const packet = f.calls.feedback[0];
+  assert.equal(packet.binding.acceptedCases, run.sourceIdentities.acceptedCases);
+  assert.deepEqual(packet.initialRows, run.rows); assert.deepEqual(packet.controlRows, control.rows);
+  assert.equal(packet.initialProvenance.origin, "LIVE_INITIAL");
+  assert.equal(Object.hasOwn(packet, "controlSource"), false, "no correction source or repair sent to model");
+  assert.equal(feedback.proposal.cases.length, 1);
+  const before = f.calls.runner;
+  await assert.rejects(() => f.controller.action("/api/compare", { acceptedId: feedback.proposal.proposalId,
+    requestId: "unreviewed-followup" }), /ACCEPTED_CASES_REQUIRED/);
+  await assert.rejects(() => f.controller.action("/api/accept", { proposalId: feedback.proposal.proposalId,
+    reviewed: true, expectations: [{ caseId: "feedback-case-1", expectedTotal: 10000 }], requestId: "wrong-followup-total" }), /EXPECTATION_RULE_MISMATCH/);
+  assert.equal(f.calls.runner, before);
+  const reviewed = await f.controller.action("/api/accept", { proposalId: feedback.proposal.proposalId,
+    reviewed: true, expectations: [{ caseId: "feedback-case-1", expectedTotal: 9900 }], requestId: "review-followup" });
+  const next = await f.controller.action("/api/compare", { acceptedId: reviewed.acceptedId, requestId: "compare-followup" });
+  const nextControl = await f.controller.action("/api/control", { runId: next.runId, requestId: "control-followup" });
+  assert.equal(next.status, "REPRODUCED"); assert.equal(nextControl.status, "NO_COUNTEREXAMPLE");
+  await assert.rejects(() => f.controller.action("/api/feedback", { runId: next.runId, controlId: nextControl.controlId,
+    requestId: "recursive-feedback" }), /INITIAL_REPRODUCED_RUN_REQUIRED/);
+  // Initial regression stays independently usable after follow-up execution.
+  const exported = await f.controller.action("/api/export", { runId: run.runId, requestId: "keep-root-regression" });
+  assert.ok(exported.testSource.includes('"amount": 10000'));
+});
+
+test("a new comparison/control/request cannot reopen the same root feedback allowance", async () => {
+  const f = await fixture(); const { acceptance, run, control } = await preparedRun(f);
+  await f.controller.action("/api/feedback", { runId: run.runId, controlId: control.controlId, requestId: "feedback-once" });
+  const next = await f.controller.action("/api/compare", { acceptedId: acceptance.acceptedId, requestId: "recompare-root" });
+  const b = await f.controller.action("/api/control", { runId: next.runId, requestId: "recontrol-root" });
+  await assert.rejects(() => f.controller.action("/api/feedback", { runId: next.runId,
+    controlId: b.controlId, requestId: "feedback-twice" }), /FEEDBACK_ALREADY_ATTEMPTED/);
+  assert.equal(f.calls.feedback.length, 1); assert.equal(f.calls.reservations, 2);
+});
+
+test("feedback refuses missing/mismatched/inconclusive B control and source drift before dispatch", async () => {
+  const f = await fixture(); const { run, control } = await preparedRun(f);
+  for (const body of [{ runId: run.runId, controlId: "other-control", requestId: "mismatch-control" },
+    { runId: run.runId, controlId: control.controlId, requestId: "injected-feedback", command: "bad" }]) {
+    await assert.rejects(() => f.controller.action("/api/feedback", body));
+  }
+  assert.equal(f.calls.feedback.length, 0); assert.equal(f.calls.reservations, 1);
+  let dirty = false;
+  const changed = await fixture({ verifySources: async () => { if (dirty) throw new Error("SOURCE_IDENTITY_CHANGED"); } });
+  const prior = await preparedRun(changed); dirty = true;
+  await assert.rejects(() => changed.controller.action("/api/feedback", { runId: prior.run.runId,
+    controlId: prior.control.controlId, requestId: "changed-feedback" }), /SOURCE_IDENTITY_CHANGED/);
+  assert.equal(changed.calls.reservations, 1); assert.equal(changed.calls.feedback.length, 0);
+  const badB = await fixture({ runner: async () => ({ rows: [{ original: { value: 9000, error: null },
+    candidate: { value: 8550, error: null } }] }) });
+  const bad = await preparedRun(badB);
+  await assert.rejects(() => badB.controller.action("/api/feedback", { runId: bad.run.runId,
+    controlId: bad.control.controlId, requestId: "bad-b-feedback" }), /MATCHING_CONTROL_REQUIRED/);
+});
+
+test("uncertain root marker, reservation or provider failures do not permit another feedback attempt", async () => {
+  for (const kind of ["lookup", "marker", "reservation", "provider", "malformed"]) {
+    let reservations = 0, providers = 0;
+    const overrides = {
+      ledger: { ready: async () => ({ reservations: [] }), reserve: async () => {
+        reservations++; if (kind === "reservation" && reservations > 1) throw new Error("uncertain reservation"); return reservations;
+      } },
+      feedbackProvider: async (packet) => { providers++; if (kind === "provider") throw new Error("provider failed");
+        return feedbackRaw(packet, { bindingId: "wrong-binding" }); },
+    };
+    if (kind === "marker") overrides.feedbackAttempts = { has: async () => false,
+      claim: async () => { throw new Error("uncertain marker"); } };
+    if (kind === "lookup") overrides.feedbackAttempts = { has: async () => { throw new Error("uncertain marker lookup"); },
+      claim: async () => { throw new Error("must not claim"); } };
+    const f = await fixture(overrides); const { run, control } = await preparedRun(f);
+    const body = { runId: run.runId, controlId: control.controlId, requestId: "first-feedback" };
+    await assert.rejects(() => f.controller.action("/api/feedback", body));
+    await assert.rejects(() => f.controller.action("/api/feedback", { ...body, requestId: "retry-feedback" }), /FEEDBACK_ALREADY_ATTEMPTED/);
+    assert.equal(providers, ["provider", "malformed"].includes(kind) ? 1 : 0);
+    assert.equal(reservations, ["lookup", "marker"].includes(kind) ? 1 : 2);
+  }
+});
+
+test("feedback final-output validator locks exact bound faults, STOP and 1-2 new data-only cases", async () => {
+  const f = await fixture(); const { run, control } = await preparedRun(f);
+  await f.controller.action("/api/feedback", { runId: run.runId, controlId: control.controlId, requestId: "obtain-packet" });
+  const packet = f.calls.feedback[0];
+  assert.equal(feedbackFromResponse(feedbackRaw(packet, { decision: "STOP", cases: [] }), packet).status, "STOPPED");
+  for (const edit of [{ bindingId: "f".repeat(64) }, { runId: "other-run" }, { explanation: "x".repeat(601) },
+    { observedFaultCaseIds: ["made-up-fault"] }, { observedFaultCaseIds: [] }, { decision: "STOP" },
+    { cases: [] }, { command: "bad" }, { cases: Array(3).fill({}) }]) {
+    assert.throws(() => feedbackFromResponse(feedbackRaw(packet, edit), packet));
+  }
+  const duplicate = feedbackRaw(packet, { cases: [{ lines: packet.acceptedCases[0].lines,
+    expectedTotal: 9000, rationale: "Repeats prior case." }] });
+  assert.equal(feedbackFromResponse(duplicate, packet).status, "INCONCLUSIVE");
+  const bad = feedbackRaw(packet); bad.status = "incomplete";
+  assert.throws(() => feedbackFromResponse(bad, packet), /MODEL_INCOMPLETE/);
+  const altered = { ...packet, binding: { ...packet.binding, control: "f".repeat(64) } };
+  const selected = { record: { proposalId: packet.binding.proposalId, acceptedCases: packet.acceptedCases },
+    change: { originalSha256: packet.binding.original, candidateSha256: packet.binding.candidate,
+      rule: packet.rule, originalSource: packet.originalSource, candidateSource: packet.proposedSource } };
+  const rebound = feedbackContext({ run, control, selected, ruleSha256: packet.binding.rule,
+    controlSha256: altered.binding.control, provenance: packet.initialProvenance });
+  assert.notEqual(rebound.bindingId, packet.bindingId);
+});
+
+async function checkpointFixture() {
+  const f = await fixture(); const { proposal, acceptance, run } = await preparedRun(f);
+  return { version: 1, scopeId: scope.id, recordedAt: new Date(NOW - 1000).toISOString(),
+    sourceIdentities: { rule: "d".repeat(64), original: "a".repeat(64), candidate: "b".repeat(64), control: "e".repeat(64) },
+    model: { responseId: "resp_synthetic_fixture", recordSha256: "f".repeat(64), createdAt: Math.floor(NOW / 1000) - 2 },
+    sourceRecordHashes: { accepted: "1".repeat(64), comparison: "2".repeat(64) },
+    proposalProvenance: "DERIVED_FROM_RETAINED_MODEL_AND_ACCEPTANCE",
+    proposal, accepted: acceptance, comparison: run,
+    recordHashes: { proposal: sha(JSON.stringify(proposal)), accepted: sha(JSON.stringify(acceptance)), comparison: sha(JSON.stringify(run)) },
+    reviewEvidence: "operator declaration, not independently attested human identity" };
+}
+
+function checkpointContext(checkpoint) {
+  return { scopeId: scope.id, sources: checkpoint.sourceIdentities, now: NOW,
+    change: { originalSha256: "a".repeat(64), candidateSha256: "b".repeat(64) } };
+}
+
+test("owner checkpoint is a pinned private bounded projection with exact sources/records/linkage, not an import endpoint", async () => {
+  const c = await checkpointFixture(); const context = checkpointContext(c);
+  assert.deepEqual(validateRetainedCheckpoint(c, context), c);
+  for (const edit of [v => { v.scopeId = "other-scope"; }, v => { v.recordHashes.accepted = "0".repeat(64); },
+    v => { v.sourceIdentities.control = "0".repeat(64); }, v => { v.recordedAt = "2027-01-01T00:00:00Z"; },
+    v => { v.baseline = { status: "PASS" }; }, v => { v.reviewEvidence = "Bobai approved"; }]) {
+    const v = structuredClone(c); edit(v); assert.throws(() => validateRetainedCheckpoint(v, context));
+  }
+  for (const edit of [v => { v.accepted.proposalId = "wrong-proposal"; },
+    v => { v.accepted.acceptedCases[0].expectedTotal = 8000; },
+    v => { v.comparison.rows[0].candidate.value = 9000; }, v => { v.comparison.sourceIdentities.acceptedCases = "0".repeat(64); }]) {
+    const v = structuredClone(c); edit(v);
+    for (const k of ["proposal", "accepted", "comparison"]) v.recordHashes[k] = sha(JSON.stringify(v[k]));
+    assert.throws(() => validateRetainedCheckpoint(v, context));
+  }
+  await owned(async (root) => {
+    const path = join(root, "checkpoint.json"), bytes = JSON.stringify(c);
+    await writeFile(path, bytes, { mode: 0o400 });
+    const pin = { path, sha256: sha(bytes) };
+    assert.deepEqual(await loadRetainedCheckpoint(pin, context), c);
+    await assert.rejects(() => loadRetainedCheckpoint({ ...pin, sha256: "0".repeat(64) }, context), /CHECKPOINT_PIN_MISMATCH/);
+    await chmod(path, 0o644); await assert.rejects(() => loadRetainedCheckpoint(pin, context), /PRIVATE_FILE_REQUIRED/);
+    await chmod(path, 0o400); await symlink(path, join(root, "linked.json"));
+    await assert.rejects(() => loadRetainedCheckpoint({ ...pin, path: join(root, "linked.json") }, context));
+    await chmod(path, 0o600); await writeFile(path, "x".repeat(32769)); await chmod(path, 0o400);
+    await assert.rejects(() => loadRetainedCheckpoint(pin, context), /PRIVATE_FILE_REQUIRED/);
+  });
+  assert.throws(() => checkRequest("POST", "/api/import", { host: "127.0.0.1:48761" }, "x"), /NOT_FOUND/);
+});
+
+test("retained initial evidence requires fresh baseline and B control, preserves provenance and uses only one new reservation", async () => {
+  const checkpoint = await checkpointFixture(); let reservations = 1;
+  const f = await fixture({ retainedCheckpoint: checkpoint,
+    ledger: { ready: async () => ({ reservations: Array(reservations) }), reserve: async () => ++reservations } },
+  { prepareBaseline: false });
+  const session = await f.controller.session();
+  assert.deepEqual(session.retainedInitial.proposal, checkpoint.proposal);
+  assert.equal(session.retainedInitial.recordedAt, checkpoint.recordedAt);
+  assert.equal(session.feedbackAttempted, false); assert.equal(f.calls.baseline, 0); assert.equal(f.calls.provider, 0);
+  await assert.rejects(() => f.controller.action("/api/propose", { changeId: "a", requestId: "retained-no-propose" }), /RETAINED_INITIAL_MODE/);
+  assert.equal(reservations, 1); assert.equal(f.calls.provider, 0);
+  const runId = checkpoint.comparison.runId;
+  await assert.rejects(() => f.controller.action("/api/control", { runId, requestId: "early-retained-control" }), /PASSING_BASELINE_REQUIRED/);
+  await f.controller.action("/api/baseline", { changeId: "a", requestId: "new-baseline" });
+  await assert.rejects(() => f.controller.action("/api/propose", { changeId: "a", requestId: "retained-no-propose-after-pass" }), /RETAINED_INITIAL_MODE/);
+  assert.equal(reservations, 1); assert.equal(f.calls.provider, 0, "retained mode cannot spend the last call on another initial proposal");
+  const control = await f.controller.action("/api/control", { runId, requestId: "new-retained-control" });
+  const feedback = await f.controller.action("/api/feedback", { runId, controlId: control.controlId, requestId: "retained-feedback" });
+  assert.equal(feedback.callsUsed, 2); assert.equal(f.calls.provider, 0); assert.equal(f.calls.feedback.length, 1);
+  assert.equal(f.calls.feedback[0].initialProvenance.origin, "RETAINED_LIVE");
+  assert.equal(f.calls.feedback[0].initialProvenance.recordedAt, checkpoint.recordedAt);
+  assert.deepEqual(f.calls.feedback[0].initialProvenance.recordHashes, checkpoint.recordHashes);
+  assert.equal((await f.controller.session()).feedbackAttempted, true);
+});
+
+test("durable root attempt survives restart and corrupt/linked marker is not absence", async () => {
+  await owned(async (root) => {
+    const attempts = createFeedbackAttempts(root), id = "fixture-root-proposal";
+    const record = { runId: "fixture-run-id", requestId: "fixture-request-id", bindingId: "a".repeat(64) };
+    assert.equal(await attempts.has(id), false); await attempts.claim(id, record);
+    assert.equal(await createFeedbackAttempts(root).has(id), true);
+    await assert.rejects(() => attempts.claim(id, record), /FEEDBACK_ALREADY_ATTEMPTED/);
+    const path = join(root, "feedback-attempt-" + id + ".json");
+    await writeFile(path, "{"); await assert.rejects(() => attempts.has(id));
+    await rm(path); await symlink("missing-file", path); await assert.rejects(() => attempts.has(id));
+  });
+});
+
+test("retained-root export and regression append fresh request records without clobbering historical proof", async () => {
+  const checkpoint = await checkpointFixture(), runId = checkpoint.comparison.runId;
+  await owned(async (root) => {
+    const oldNames = ["export-" + runId, "regression-" + runId];
+    for (const name of oldNames) await writeFile(join(root, name + ".json"), "historical proof\n", { mode: 0o600, flag: "wx" });
+    const f = await fixture({ retainedCheckpoint: checkpoint,
+      retain: async (name, data) => writeFile(join(root, name + ".json"), JSON.stringify(data), { mode: 0o600, flag: "wx" }) });
+    const exported = await f.controller.action("/api/export", { runId, requestId: "fresh-retained-export" });
+    const proof = await f.controller.action("/api/regression", { runId, requestId: "fresh-retained-regression" });
+    assert.equal(proof.status, "RED_THEN_GREEN"); assert.equal(proof.testSha256, exported.sha256);
+    for (const name of oldNames) assert.equal(await readFile(join(root, name + ".json"), "utf8"), "historical proof\n");
+    assert.equal(JSON.parse(await readFile(join(root, "export-" + runId + "-fresh-retained-export.json"))).sha256, exported.sha256);
+    assert.equal(JSON.parse(await readFile(join(root, "regression-" + runId + "-fresh-retained-regression.json"))).testSha256, exported.sha256);
+  });
+});
+
+test("feedback provider reuses the fixed model/4096 cap, closed schema and redaction without executable tools", async () => {
+  let body, options, url; const req = new EventEmitter(), res = new EventEmitter();
+  const keyText = "synthetic-test-credential-never-real", key = Buffer.from(keyText);
+  req.destroy = () => req.emit("close");
+  req.end = (value) => { body = JSON.parse(value); };
+  res.statusCode = 200; res.complete = true;
+  const raw = await museFeedback("unused", { public: "synthetic outputs" }, scope.deadline, {
+    now: () => NOW, readCredential: async () => key,
+    request: (u, o, callback) => {
+      url = u; options = o;
+      queueMicrotask(() => { callback(res); res.emit("data", Buffer.from(JSON.stringify({ echo: keyText })));
+        res.emit("end"); req.emit("close"); }); return req;
+    },
+  });
+  assert.equal(url, "https://api.meta.ai/v1/responses"); assert.equal(options.method, "POST");
+  assert.equal(body.max_output_tokens, 4096); assert.equal(body.model, "muse-spark-1.3");
+  assert.equal(body.store, false); assert.equal(body.stream, false); assert.deepEqual(body.tools, []);
+  assert.equal(body.text.format.name, "pricing_feedback"); assert.equal(body.text.format.schema.additionalProperties, false);
+  assert.equal(raw.echo, "[REDACTED]"); assert.ok(key.every((x) => x === 0));
+});
+
+// Explicit optional owner evidence input, never part of ordinary fixture proof or service startup.
+if (process.env.OTA_DEMO_TEST_CHECKPOINT || process.env.OTA_DEMO_TEST_CHECKPOINT_SHA256) {
+  test("the explicitly pinned owner checkpoint validates against current rule/original/A/B without service/provider adoption", async () => {
+    const root = fileURLToPath(new URL("..", import.meta.url));
+    const files = { rule: "pricing/rule.json", original: "pricing/original.ts",
+      candidate: "pricing/change-a.ts", control: "pricing/change-b.ts" };
+    const sources = Object.fromEntries(await Promise.all(Object.entries(files).map(async ([key, file]) =>
+      [key, sha(await readFile(join(root, file)))])));
+    const checkpoint = await loadRetainedCheckpoint({ path: process.env.OTA_DEMO_TEST_CHECKPOINT,
+      sha256: process.env.OTA_DEMO_TEST_CHECKPOINT_SHA256 }, {
+      scopeId: "pricing-live-mvp-20261027-01", sources,
+      change: { originalSha256: sources.original, candidateSha256: sources.candidate },
+    });
+    assert.equal(checkpoint.proposal.callsUsed, 5);
+    assert.equal(checkpoint.model.responseId, "resp_6ae0777356302ca9d9a840a9");
+    assert.equal(checkpoint.proposalProvenance, "DERIVED_FROM_RETAINED_MODEL_AND_ACCEPTANCE");
+    assert.deepEqual(checkpoint.comparison.rows.map((r) => r.candidate.value), [8550, 17550]);
+    assert.deepEqual(checkpoint.accepted.acceptedCases.map((c) => c.expectedTotal), [9000, 17500]);
+  });
+}

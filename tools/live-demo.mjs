@@ -13,6 +13,7 @@ export const STOP_AT = "2026-10-27T14:00:00.000Z";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[a-zA-Z0-9-]{8,80}$/;
+const validId = (x) => typeof x === "string" && ID.test(x);
 const MODEL = "muse-spark-1.3";
 export const RUNTIME_FILES = ["pricing/rule.json", "pricing/original.ts", "pricing/change-a.ts",
   "pricing/change-b.ts", "tools/live-demo.mjs", "tools/pricing-runner.mjs",
@@ -66,15 +67,20 @@ async function privateDirectory(path) {
     && (s.mode & 0o777) === 0o700, "PRIVATE_DIRECTORY_REQUIRED", 503);
 }
 
-async function readPrivate(path, max = 32768) {
+async function readPrivate(path, max = 32768, mode = 0o600) {
   const f = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const s = await f.stat();
-    requireThat(s.isFile() && s.uid === process.getuid() && (s.mode & 0o777) === 0o600
+    requireThat(s.isFile() && s.uid === process.getuid() && (s.mode & 0o777) === mode
       && s.nlink === 1 && s.size <= max, "PRIVATE_FILE_REQUIRED", 503);
-    const data = await f.readFile();
-    requireThat(data.length <= max, "PRIVATE_FILE_TOO_LARGE", 503);
-    return data;
+    const data = Buffer.alloc(max + 1); let length = 0;
+    while (length < data.length) {
+      const { bytesRead } = await f.read(data, length, data.length - length, null);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    requireThat(length <= max, "PRIVATE_FILE_TOO_LARGE", 503);
+    return data.subarray(0, length);
   } finally { await f.close(); }
 }
 
@@ -220,7 +226,7 @@ export function checkRequest(method, path, headers, nonce) {
     requireThat(["/", "/app.js", "/styles.css", "/health", "/api/session"].includes(path), "NOT_FOUND", 404);
     return;
   }
-  requireThat(method === "POST" && ["/api/baseline", "/api/propose", "/api/accept", "/api/compare", "/api/export", "/api/regression"].includes(path), "NOT_FOUND", 404);
+  requireThat(method === "POST" && ["/api/baseline", "/api/propose", "/api/accept", "/api/compare", "/api/control", "/api/feedback", "/api/export", "/api/regression"].includes(path), "NOT_FOUND", 404);
   requireThat(headers.origin === ORIGIN && headers["x-demo-token"] === nonce,
     "ORIGIN_OR_NONCE_REFUSED", 403);
   requireThat(headers["content-type"] === "application/json", "JSON_REQUIRED", 415);
@@ -239,13 +245,18 @@ export function exportRegression(changeId, cases) {
     + '    assert.equal(priceCart(item.lines), item.expected);\n  });\n}\n';
 }
 
-function casesFromResponse(response) {
+function finalModelValue(response) {
   requireThat(response?.status === "completed" && response.error == null && response.model === MODEL,
     "MODEL_INCOMPLETE", 502);
   const parts = response.output?.filter((x) => x.type === "message")
     .flatMap((x) => x.content ?? []).filter((x) => x.type === "output_text");
   requireThat(parts?.length === 1 && bounded(parts[0].text, 16000), "MODEL_OUTPUT_INVALID", 502);
-  const value = JSON.parse(parts[0].text);
+  try { return JSON.parse(parts[0].text); }
+  catch { throw new Refusal("MODEL_OUTPUT_INVALID", 502); }
+}
+
+function casesFromResponse(response) {
+  const value = finalModelValue(response);
   requireThat(exact(value, ["cases"]) && Array.isArray(value.cases)
     && value.cases.length <= 3, "MODEL_CASES_INVALID", 502);
   requireThat(value.cases.length > 0, "NO_CASES_PROPOSED", 422);
@@ -256,22 +267,208 @@ function casesFromResponse(response) {
   });
 }
 
+function modelUsage(raw) {
+  const token = (x) => integer(x, 0, 100000000) ? x : null;
+  return { inputTokens: token(raw.usage?.input_tokens), outputTokens: token(raw.usage?.output_tokens) };
+}
+
+function comparisonRows(actual, frozen) {
+  requireThat(exact(actual, ["rows"]) && Array.isArray(actual.rows)
+    && actual.rows.length === frozen.length, "RUNNER_OUTPUT_INVALID", 502);
+  return actual.rows.map((r, i) => {
+    requireThat(exact(r, ["original", "candidate"])
+      && [r.original, r.candidate].every((x) => exact(x, ["value", "error"])
+        && ((integer(x.value) && x.error === null) || (x.value === null && bounded(x.error, 100)))),
+    "RUNNER_OUTPUT_INVALID", 502);
+    return { caseId: frozen[i].caseId, expectedTotal: frozen[i].expectedTotal, ...r };
+  });
+}
+
+function comparisonStatus(rows) {
+  return rows.some((r) => r.original.error || r.candidate.error || r.original.value !== r.expectedTotal)
+    ? "INCONCLUSIVE" : rows.some((r) => r.candidate.value !== r.expectedTotal)
+      ? "REPRODUCED" : "NO_COUNTEREXAMPLE";
+}
+
+const basketIdentity = (lines) => sha(JSON.stringify(lines.map((x) => [x.amount, x.discountEligible])
+  .sort((a, b) => a[0] - b[0] || Number(a[1]) - Number(b[1]))));
+
+export function feedbackContext({ run, control, selected, ruleSha256, controlSha256, provenance }) {
+  const binding = { domain: "break-this-pr/feedback-context/v1", runId: run.runId,
+    acceptedId: run.acceptedId, proposalId: selected.record.proposalId,
+    acceptedCases: sha(JSON.stringify(selected.record.acceptedCases)), rule: ruleSha256,
+    original: selected.change.originalSha256, candidate: selected.change.candidateSha256,
+    control: controlSha256, controlId: control.controlId,
+    initialRows: sha(JSON.stringify(run.rows)), controlRows: sha(JSON.stringify(control.rows)),
+    provenance: sha(JSON.stringify(provenance ?? null)) };
+  requireThat([binding.rule, binding.original, binding.candidate, binding.control].every((x) => HASH.test(x)),
+    "FEEDBACK_SOURCES_REQUIRED", 503);
+  const bindingId = sha("break-this-pr/feedback-binding/v1\n" + JSON.stringify(binding));
+  return { bindingId, runId: run.runId, binding, rule: selected.change.rule,
+    originalSource: selected.change.originalSource, proposedSource: selected.change.candidateSource,
+    acceptedCases: selected.record.acceptedCases, initialRows: run.rows, controlRows: control.rows,
+    initialProvenance: provenance ?? null };
+}
+
+export function feedbackFromResponse(raw, packet) {
+  const v = finalModelValue(raw);
+  requireThat(exact(v, ["bindingId", "runId", "explanation", "observedFaultCaseIds", "decision", "cases"])
+    && v.bindingId === packet.bindingId && v.runId === packet.runId
+    && bounded(v.explanation) && ["STOP", "PROPOSE_CASES"].includes(v.decision)
+    && Array.isArray(v.observedFaultCaseIds) && v.observedFaultCaseIds.length <= 3
+    && new Set(v.observedFaultCaseIds).size === v.observedFaultCaseIds.length
+    && Array.isArray(v.cases) && v.cases.length <= 2, "FEEDBACK_OUTPUT_INVALID", 502);
+  const failing = new Set(packet.initialRows.filter((r) => !r.original.error && !r.candidate.error
+    && r.original.value === r.expectedTotal && r.candidate.value !== r.expectedTotal).map((r) => r.caseId));
+  requireThat(v.observedFaultCaseIds.length === failing.size
+    && v.observedFaultCaseIds.every((id) => failing.has(id)), "FEEDBACK_FAULT_ID_INVALID", 502);
+  requireThat(v.decision === "STOP" ? v.cases.length === 0
+    : v.cases.length > 0 && v.observedFaultCaseIds.length > 0, "FEEDBACK_DECISION_INVALID", 502);
+  const cases = v.cases.map((c, i) => {
+    requireThat(exact(c, ["lines", "expectedTotal", "rationale"]) && isCart(c.lines)
+      && integer(c.expectedTotal) && bounded(c.rationale), "FEEDBACK_CASES_INVALID", 502);
+    return { id: "feedback-case-" + (i + 1), ...c };
+  });
+  const previous = new Set(packet.acceptedCases.map((c) => basketIdentity(c.lines)));
+  const duplicates = cases.some((c) => {
+    const identity = basketIdentity(c.lines); const seen = previous.has(identity); previous.add(identity); return seen;
+  });
+  return { status: duplicates ? "INCONCLUSIVE" : v.decision === "STOP" ? "STOPPED" : "FOLLOW_UP_PROPOSED",
+    explanation: v.explanation, cases: duplicates ? [] : cases };
+}
+
+// A pinned owner projection is continuity evidence, not fresh execution or an authenticated human decision.
+export function validateRetainedCheckpoint(value, { scopeId, change, sources, now = Date.now() }) {
+  requireThat(exact(value, ["version", "scopeId", "recordedAt", "sourceIdentities", "model",
+    "proposal", "accepted", "comparison", "recordHashes", "reviewEvidence", "sourceRecordHashes", "proposalProvenance"])
+    && value.version === 1 && value.scopeId === scopeId
+    && bounded(value.recordedAt, 40) && Number.isFinite(Date.parse(value.recordedAt))
+    && Date.parse(value.recordedAt) <= now
+    && exact(value.sourceIdentities, ["rule", "original", "candidate", "control"])
+    && Object.keys(sources).every((key) => HASH.test(value.sourceIdentities[key])
+      && value.sourceIdentities[key] === sources[key])
+    && exact(value.model, ["responseId", "recordSha256", "createdAt"]) && bounded(value.model.responseId, 100)
+    && HASH.test(value.model.recordSha256) && integer(value.model.createdAt, 0, Math.floor(now / 1000))
+    && value.model.createdAt * 1000 <= Date.parse(value.recordedAt)
+    && exact(value.sourceRecordHashes, ["accepted", "comparison"])
+    && Object.values(value.sourceRecordHashes).every((x) => HASH.test(x))
+    && value.proposalProvenance === "DERIVED_FROM_RETAINED_MODEL_AND_ACCEPTANCE"
+    && value.reviewEvidence === "operator declaration, not independently attested human identity",
+  "CHECKPOINT_INVALID", 503);
+  const { proposal: p, accepted: a, comparison: r } = value;
+  requireThat(exact(value.recordHashes, ["proposal", "accepted", "comparison"])
+    && ["proposal", "accepted", "comparison"].every((key) => HASH.test(value.recordHashes[key])
+      && value.recordHashes[key] === sha(JSON.stringify(value[key]))), "CHECKPOINT_RECORD_HASH_MISMATCH", 503);
+  requireThat(exact(p, ["kind", "origin", "proposalId", "model", "cases", "usage", "callsUsed"])
+    && p.kind === "proposal" && p.origin === "LIVE" && validId(p.proposalId) && p.model === MODEL
+    && integer(p.callsUsed, 1, 6) && exact(p.usage, ["inputTokens", "outputTokens"])
+    && Object.values(p.usage).every((x) => x === null || integer(x, 0, 100000000))
+    && Array.isArray(p.cases) && p.cases.length >= 1 && p.cases.length <= 3
+    && p.cases.every((c, i) => exact(c, ["id", "lines", "expectedTotal", "rationale"])
+      && c.id === "case-" + (i + 1) && isCart(c.lines) && integer(c.expectedTotal) && bounded(c.rationale)),
+  "CHECKPOINT_PROPOSAL_INVALID", 503);
+  requireThat(exact(a, ["kind", "origin", "acceptedId", "proposalId", "acceptedCases"])
+    && a.kind === "accepted" && a.origin === "LIVE" && validId(a.acceptedId) && a.proposalId === p.proposalId
+    && Array.isArray(a.acceptedCases) && a.acceptedCases.length === p.cases.length
+    && a.acceptedCases.every((c, i) => exact(c, ["caseId", "lines", "expectedTotal", "expectationOrigin"])
+      && c.caseId === p.cases[i].id && JSON.stringify(c.lines) === JSON.stringify(p.cases[i].lines)
+      && c.expectedTotal === ruleTotal(c.lines)
+      && c.expectationOrigin === (c.expectedTotal === p.cases[i].expectedTotal ? "META_ACCEPTED" : "REVIEWER_CORRECTED")),
+  "CHECKPOINT_ACCEPTANCE_INVALID", 503);
+  requireThat(exact(r, ["kind", "origin", "runId", "acceptedId", "status", "rows", "sourceIdentities", "limits"])
+    && r.kind === "comparison" && r.origin === "LIVE" && validId(r.runId) && r.acceptedId === a.acceptedId
+    && Array.isArray(r.rows) && r.rows.every((row) => exact(row, ["caseId", "expectedTotal", "original", "candidate"]))
+    && exact(r.sourceIdentities, ["original", "candidate", "acceptedCases"])
+    && r.sourceIdentities.original === change.originalSha256
+    && r.sourceIdentities.candidate === change.candidateSha256
+    && r.sourceIdentities.acceptedCases === sha(JSON.stringify(a.acceptedCases))
+    && Array.isArray(r.limits) && r.limits.length <= 10 && r.limits.every((x) => bounded(x, 600)),
+  "CHECKPOINT_COMPARISON_INVALID", 503);
+  const rows = comparisonRows({ rows: r.rows.map(({ original, candidate }) => ({ original, candidate })) }, a.acceptedCases);
+  requireThat(JSON.stringify(rows) === JSON.stringify(r.rows) && r.status === comparisonStatus(rows),
+    "CHECKPOINT_COMPARISON_INVALID", 503);
+  return structuredClone(value);
+}
+
+export async function loadRetainedCheckpoint(pin, context) {
+  requireThat(exact(pin, ["path", "sha256"]) && isAbsolute(pin.path) && resolve(pin.path) === pin.path
+    && HASH.test(pin.sha256), "CHECKPOINT_PIN_INVALID", 503);
+  for (let parent = dirname(pin.path); ; parent = dirname(parent)) {
+    const s = await lstat(parent);
+    requireThat(s.isDirectory() && !s.isSymbolicLink(), "CHECKPOINT_PATH_LINKED", 503);
+    if (parent === dirname(parent)) break;
+  }
+  const bytes = await readPrivate(pin.path, 32768, 0o400);
+  requireThat(sha(bytes) === pin.sha256, "CHECKPOINT_PIN_MISMATCH", 503);
+  let value;
+  try { value = JSON.parse(bytes.toString("utf8")); }
+  catch { throw new Refusal("CHECKPOINT_INVALID", 503); }
+  return validateRetainedCheckpoint(value, context);
+}
+
+export function createFeedbackAttempts(directory) {
+  const path = (root) => { requireThat(validId(root), "FEEDBACK_ROOT_INVALID"); return join(directory, "feedback-attempt-" + root + ".json"); };
+  return {
+    async has(root) {
+      await privateDirectory(directory);
+      try {
+        const record = JSON.parse((await readPrivate(path(root), 2048)).toString("utf8"));
+        requireThat(exact(record, ["rootProposalId", "runId", "requestId", "bindingId"])
+          && record.rootProposalId === root && validId(record.runId) && validId(record.requestId)
+          && HASH.test(record.bindingId), "FEEDBACK_ATTEMPT_UNCERTAIN", 503);
+        return true;
+      } catch (e) { if (e.code === "ENOENT") return false; throw e; }
+    },
+    async claim(root, record) {
+      await privateDirectory(directory);
+      try { await exclusiveJSON(path(root), { rootProposalId: root, ...record }); }
+      catch (e) { if (e.code === "EEXIST") throw new Refusal("FEEDBACK_ALREADY_ATTEMPTED", 409); throw e; }
+    },
+  };
+}
+
 export function createController({ changes, scope, ledger, provider, runner, verifySources,
-  retain, persistExport, baselineCoverage, baselineIdentity, verification, lifecycle = createLifecycle(), now = Date.now,
+  retain, persistExport, baselineCoverage, baselineIdentity, verification, feedbackProvider,
+  feedbackAttempts, ruleIdentity, controlIdentity, retainedCheckpoint,
+  lifecycle = createLifecycle(), now = Date.now,
   nonce = randomBytes(32).toString("hex") }) {
   const proposals = new Map(), accepted = new Map(), runs = new Map(), seen = new Set();
   const acceptedProposals = new Set();
   const baselines = new Map();
+  const feedbackAttempted = new Set();
+  let retainedInitial;
+  if (retainedCheckpoint) {
+    const change = changes.find((c) => c.id === "a");
+    const checkpoint = validateRetainedCheckpoint(retainedCheckpoint, { scopeId: scope.id, change,
+      sources: { rule: ruleIdentity, original: change.originalSha256,
+        candidate: change.candidateSha256, control: controlIdentity }, now: now() });
+    const { proposal, accepted: record, comparison: result, recordedAt, recordHashes } = checkpoint;
+    retainedInitial = { proposal, accepted: record, comparison: result, recordedAt, recordHashes,
+      proposalProvenance: checkpoint.proposalProvenance, model: checkpoint.model,
+      sourceRecordHashes: checkpoint.sourceRecordHashes };
+    proposals.set(proposal.proposalId, { ...proposal, change, rootProposalId: proposal.proposalId,
+      provenance: { origin: "RETAINED_LIVE", recordedAt, recordHashes, model: checkpoint.model,
+        sourceRecordHashes: checkpoint.sourceRecordHashes, proposalProvenance: checkpoint.proposalProvenance,
+        reviewEvidence: checkpoint.reviewEvidence } });
+    const selected = { record, change, rootProposalId: proposal.proposalId, feedback: false };
+    accepted.set(record.acceptedId, selected); acceptedProposals.add(proposal.proposalId);
+    runs.set(result.runId, { result, selected });
+  }
   let busy = false;
   return {
     nonce,
     async session() {
       lifecycle.check();
       requireThat(now() < Date.parse(scope.deadline), "WINDOW_ENDED", 403);
+      await verifySources(); lifecycle.check();
       const budget = await ledger.ready();
       lifecycle.check();
+      if (retainedInitial) requireThat(budget.reservations.length >= retainedInitial.proposal.callsUsed,
+        "CHECKPOINT_BUDGET_PRECEDES_HISTORY", 503);
       return { mode: "LIVE", csrfToken: nonce, callsUsed: budget.reservations.length, limit: 6,
         deadline: scope.deadline, baselineCoverage,
+        ...(retainedInitial ? { retainedInitial, feedbackAttempted: feedbackAttempted.has(retainedInitial.proposal.proposalId)
+          || await feedbackAttempts.has(retainedInitial.proposal.proposalId) } : {}),
         changes: changes.map(({ originalSource, candidateSource, ...publicChange }) => publicChange) };
     },
     async action(path, body) { return lifecycle.run(async () => {
@@ -302,6 +499,7 @@ export function createController({ changes, scope, ledger, provider, runner, ver
         }
         if (path === "/api/propose") {
           requireThat(exact(body, ["changeId", "requestId"]), "INVALID_FIELDS");
+          requireThat(!retainedInitial, "RETAINED_INITIAL_MODE", 409);
           const change = changes.find((c) => c.id === body.changeId);
           requireThat(change, "CHANGE_NOT_FOUND", 404);
           requireThat(baselines.has(body.changeId), "PASSING_BASELINE_REQUIRED", 409);
@@ -323,8 +521,10 @@ export function createController({ changes, scope, ledger, provider, runner, ver
           const cases = casesFromResponse(raw);
           const proposalId = randomUUID();
           const result = { kind: "proposal", origin: "LIVE", proposalId, model: MODEL, cases,
-            usage: { inputTokens: raw.usage?.input_tokens ?? null, outputTokens: raw.usage?.output_tokens ?? null }, callsUsed };
-          proposals.set(proposalId, { ...result, change });
+            usage: modelUsage(raw), callsUsed };
+          await retain("proposal-" + proposalId, result); lifecycle.check();
+          proposals.set(proposalId, { ...result, change, rootProposalId: proposalId,
+            provenance: { origin: "LIVE_INITIAL", recordedAt: new Date(now()).toISOString() } });
           return result;
         }
         if (path === "/api/accept") {
@@ -353,13 +553,15 @@ export function createController({ changes, scope, ledger, provider, runner, ver
             reviewEvidence: "operator declaration, not independently attested human identity" });
           lifecycle.check();
           acceptedProposals.add(proposal.proposalId);
-          accepted.set(acceptedId, { record, change: proposal.change });
+          accepted.set(acceptedId, { record, change: proposal.change,
+            rootProposalId: proposal.rootProposalId, feedback: proposal.feedback === true });
           return record;
         }
         if (path === "/api/compare") {
           requireThat(exact(body, ["acceptedId", "requestId"]), "INVALID_FIELDS");
           const selected = accepted.get(body.acceptedId);
           requireThat(selected, "ACCEPTED_CASES_REQUIRED", 409);
+          requireThat(baselines.has(selected.change.id), "PASSING_BASELINE_REQUIRED", 409);
           const frozen = selected.record.acceptedCases;
           let actual;
           try { actual = await runner(selected.change.id, frozen.map((c) => c.lines)); }
@@ -371,19 +573,9 @@ export function createController({ changes, scope, ledger, provider, runner, ver
             })) };
           }
           lifecycle.check();
-          requireThat(exact(actual, ["rows"]) && Array.isArray(actual.rows)
-            && actual.rows.length === frozen.length, "RUNNER_OUTPUT_INVALID", 502);
-          const rows = actual.rows.map((r, i) => {
-            requireThat(exact(r, ["original", "candidate"])
-              && [r.original, r.candidate].every((x) => exact(x, ["value", "error"])
-                && ((integer(x.value) && x.error === null) || (x.value === null && bounded(x.error, 100)))),
-            "RUNNER_OUTPUT_INVALID", 502);
-            return { caseId: frozen[i].caseId, expectedTotal: frozen[i].expectedTotal, ...r };
-          });
-          const incomplete = rows.some((r) => r.original.error || r.candidate.error
-            || r.original.value !== r.expectedTotal);
-          const status = incomplete ? "INCONCLUSIVE"
-            : rows.some((r) => r.candidate.value !== r.expectedTotal) ? "REPRODUCED" : "NO_COUNTEREXAMPLE";
+          await verifySources(); lifecycle.check();
+          const rows = comparisonRows(actual, frozen);
+          const status = comparisonStatus(rows);
           const runId = randomUUID();
           const result = { kind: "comparison", origin: "LIVE", runId, acceptedId: body.acceptedId, status, rows,
             sourceIdentities: { original: selected.change.originalSha256, candidate: selected.change.candidateSha256,
@@ -397,17 +589,87 @@ export function createController({ changes, scope, ledger, provider, runner, ver
           runs.set(runId, { result, selected });
           return result;
         }
+        if (path === "/api/control") {
+          requireThat(exact(body, ["runId", "requestId"]), "INVALID_FIELDS");
+          const run = runs.get(body.runId);
+          requireThat(run, "MEANINGFUL_RUN_REQUIRED", 409);
+          requireThat(baselines.has("a"), "PASSING_BASELINE_REQUIRED", 409);
+          requireThat(HASH.test(controlIdentity), "CONTROL_SOURCE_REQUIRED", 503);
+          requireThat(!run.controlAttempted, "CONTROL_ALREADY_RUN", 409); run.controlAttempted = true;
+          const frozen = run.selected.record.acceptedCases;
+          let actual;
+          try { actual = await runner("b", frozen.map((c) => c.lines)); }
+          catch { actual = { rows: frozen.map(() => ({ original: { value: null, error: "RUNNER_NOT_ESTABLISHED" },
+            candidate: { value: null, error: "RUNNER_NOT_ESTABLISHED" } })) }; }
+          lifecycle.check(); await verifySources(); lifecycle.check();
+          const rows = comparisonRows(actual, frozen);
+          const result = { kind: "control", origin: "LOCAL_EXECUTION", controlId: randomUUID(),
+            runId: body.runId, acceptedId: run.result.acceptedId, status: comparisonStatus(rows), rows,
+            sourceIdentities: { original: run.selected.change.originalSha256, candidate: controlIdentity,
+              acceptedCases: sha(JSON.stringify(frozen)) },
+            limits: ["The same selected cases against fixed pre-reviewed B, not a Muse-generated repair.",
+              "No counterexample is not whole-PR approval, all-input correctness or a false-positive rate."] };
+          await retain("control-" + result.controlId, result); lifecycle.check(); run.control = result;
+          return result;
+        }
+        if (path === "/api/feedback") {
+          requireThat(exact(body, ["runId", "controlId", "requestId"]), "INVALID_FIELDS");
+          const run = runs.get(body.runId);
+          requireThat(run?.result.status === "REPRODUCED" && !run.selected.feedback,
+            "INITIAL_REPRODUCED_RUN_REQUIRED", 409);
+          requireThat(baselines.has("a"), "PASSING_BASELINE_REQUIRED", 409);
+          requireThat(run.control?.controlId === body.controlId && run.control.status === "NO_COUNTEREXAMPLE",
+            "MATCHING_CONTROL_REQUIRED", 409);
+          requireThat(feedbackProvider && feedbackAttempts, "FEEDBACK_UNAVAILABLE", 503);
+          const root = run.selected.rootProposalId;
+          requireThat(!feedbackAttempted.has(root), "FEEDBACK_ALREADY_ATTEMPTED", 409);
+          feedbackAttempted.add(root);
+          requireThat(!await feedbackAttempts.has(root), "FEEDBACK_ALREADY_ATTEMPTED", 409);
+          lifecycle.check();
+          const packet = feedbackContext({ run: run.result, control: run.control, selected: run.selected,
+            ruleSha256: ruleIdentity, controlSha256: controlIdentity, provenance: proposals.get(root).provenance });
+          // No retry even if persistence/reservation/dispatch has an uncertain outcome.
+          await feedbackAttempts.claim(root, { runId: body.runId, requestId: body.requestId, bindingId: packet.bindingId });
+          lifecycle.check();
+          const callsUsed = await ledger.reserve(body.requestId); lifecycle.check();
+          await retain("feedback-context-" + root, packet); lifecycle.check();
+          await verifySources(); lifecycle.check();
+          let raw;
+          try { raw = await feedbackProvider(packet); }
+          catch {
+            lifecycle.check();
+            await retain("feedback-model-" + callsUsed + "-failure", { requestId: body.requestId,
+              outcome: "FAILED_OR_UNKNOWN_CONSUMED", callsUsed, bindingId: packet.bindingId });
+            throw new Refusal("PROVIDER_FAILED_CONSUMED", 502);
+          }
+          lifecycle.check(); await verifySources(); lifecycle.check();
+          await retain("feedback-model-" + callsUsed, raw); lifecycle.check();
+          const parsed = feedbackFromResponse(raw, packet);
+          const proposal = parsed.status === "FOLLOW_UP_PROPOSED" ? { kind: "proposal", origin: "LIVE",
+            proposalId: randomUUID(), model: MODEL, cases: parsed.cases, usage: modelUsage(raw), callsUsed } : null;
+          const result = { kind: "feedback", origin: "LIVE", feedbackId: randomUUID(), runId: body.runId,
+            controlId: body.controlId, bindingId: packet.bindingId, status: parsed.status,
+            explanation: parsed.explanation, proposal, usage: modelUsage(raw), callsUsed,
+            limits: ["Model interpretation of bound observed outputs, not independent execution proof or approval.",
+              "Follow-up cases are outcome-informed, not uncoached discovery; review expectations before execution.",
+              "One feedback attempt per initial proposal; no automatic retry or recursive feedback."] };
+          await retain("feedback-" + root, result); lifecycle.check();
+          if (proposal) proposals.set(proposal.proposalId, { ...proposal, change: run.selected.change,
+            rootProposalId: root, feedback: true });
+          return result;
+        }
         if (path === "/api/export") {
           requireThat(exact(body, ["runId", "requestId"]), "INVALID_FIELDS");
           const run = runs.get(body.runId);
           requireThat(run && run.result.status !== "INCONCLUSIVE", "MEANINGFUL_RUN_REQUIRED", 409);
+          requireThat(baselines.has("a"), "PASSING_BASELINE_REQUIRED", 409);
           const testSource = exportRegression(run.selected.change.id, run.selected.record.acceptedCases);
           const artifact = await persistExport(testSource);
           lifecycle.check();
           requireThat(artifact?.sha256 === sha(testSource), "EXPORT_PERSISTENCE_FAILED", 503);
           const result = { kind: "export", origin: "LIVE", filename: "regression.test.mjs", testSource,
             sha256: artifact.sha256, path: "evidence/regression.test.mjs", command: "ota run verify:export --agent" };
-          await retain("export-" + body.runId, result);
+          await retain("export-" + body.runId + "-" + body.requestId, result);
           lifecycle.check();
           run.exported = result;
           return result;
@@ -417,6 +679,7 @@ export function createController({ changes, scope, ledger, provider, runner, ver
           const run = runs.get(body.runId);
           requireThat(run?.result.status === "REPRODUCED" && run.exported && verification,
             "REPRODUCED_EXPORT_REQUIRED", 409);
+          requireThat(baselines.has("a"), "PASSING_BASELINE_REQUIRED", 409);
           requireThat(!run.regressionAttempted, "REGRESSION_ALREADY_RUN", 409);
           run.regressionAttempted = true;
           const proof = await verification.regression({ testSource: run.exported.testSource,
@@ -427,7 +690,7 @@ export function createController({ changes, scope, ledger, provider, runner, ver
             limits: ["Same fixed-template test and accepted expectations; only the prepared implementation correction changes.",
               "The correction was reviewed in advance, not generated by Muse.",
               "Prepared local sample only: not all-input correctness, CI, a real customer PR or production assurance."] };
-          await retain("regression-" + body.runId, result); lifecycle.check();
+          await retain("regression-" + body.runId + "-" + body.requestId, result); lifecycle.check();
           return result;
         }
         throw new Refusal("NOT_FOUND", 404);
@@ -445,7 +708,34 @@ const modelSchema = { type: "object", properties: { cases: { type: "array", item
   }, required: ["lines", "expectedTotal", "rationale"], additionalProperties: false,
 } } }, required: ["cases"], additionalProperties: false };
 
-export async function museProposal(keyFile, packet, deadline, {
+const feedbackSchema = { type: "object", properties: {
+  bindingId: { type: "string" }, runId: { type: "string" }, explanation: { type: "string" },
+  observedFaultCaseIds: { type: "array", items: { type: "string" } },
+  decision: { type: "string", enum: ["STOP", "PROPOSE_CASES"] }, cases: modelSchema.properties.cases,
+}, required: ["bindingId", "runId", "explanation", "observedFaultCaseIds", "decision", "cases"], additionalProperties: false };
+
+const initialPrompt = "Propose at most three concrete cases to check this pricing change against the independently written rule. "
+  + "The original is not a specification. Give an integer expected total from the rule, and a brief rationale. "
+  + "Do not return code, commands, a repair, or a general safety verdict. If no useful case can be identified return cases:[].\n";
+const feedbackPrompt = "This is ONE outcome-informed feedback turn, not fresh uncoached discovery. "
+  + "The input contains reviewed cases and actual outputs from original, proposed A and fixed reviewed B. "
+  + "Explain the specific observed fault in at most 600 characters; do not invent observations. "
+  + "Echo bindingId and runId exactly. observedFaultCaseIds must equal the set of initialRows caseIds whose "
+  + "original equals expectedTotal and candidate differs, with neither error. "
+  + "Return STOP with cases:[] if no useful further case is needed, or PROPOSE_CASES with 1-2 NEW data-only baskets, "
+  + "integer rule-derived expectedTotal and rationale at most 600 characters each. Do not repeat any existing basket "
+  + "or reorder it as a new case. No code, commands, repair, universal-correctness verdict or merge approval. "
+  + "Respect retained initial provenance; do not describe retained results as fresh execution.\n";
+
+export function museProposal(keyFile, packet, deadline, options) {
+  return museStructuredRequest(keyFile, packet, deadline, initialPrompt, "pricing_cases", modelSchema, options);
+}
+
+export function museFeedback(keyFile, packet, deadline, options) {
+  return museStructuredRequest(keyFile, packet, deadline, feedbackPrompt, "pricing_feedback", feedbackSchema, options);
+}
+
+async function museStructuredRequest(keyFile, packet, deadline, prompt, schemaName, schema, {
   lifecycle = createLifecycle(), readCredential = readPrivate, request = httpsRequest,
   now = Date.now,
 } = {}) {
@@ -455,14 +745,11 @@ export async function museProposal(keyFile, packet, deadline, {
   lifecycle.check();
   const key = keyBuffer.toString("utf8").trim();
   requireThat(/^[A-Za-z0-9._~-]{16,512}$/.test(key), "CREDENTIAL_INVALID", 503);
-  const input = "Propose at most three concrete cases to check this pricing change against the independently written rule. "
-    + "The original is not a specification. Give an integer expected total from the rule, and a brief rationale. "
-    + "Do not return code, commands, a repair, or a general safety verdict. If no useful case can be identified return cases:[].\n"
-    + JSON.stringify(packet);
+  const input = prompt + JSON.stringify(packet);
   requireThat(Buffer.byteLength(input) <= 16384, "PACKET_TOO_LARGE");
   const body = JSON.stringify({ model: MODEL, input, store: false, stream: false, tools: [],
-    max_output_tokens: 4096, text: { format: { type: "json_schema", name: "pricing_cases",
-      strict: true, schema: modelSchema } } });
+    max_output_tokens: 4096, text: { format: { type: "json_schema", name: schemaName,
+      strict: true, schema } } });
     return await new Promise((accept, reject) => {
       let connectTimer, req;
       let settled = false;
@@ -546,7 +833,7 @@ async function captureChild({ executable, args, cwd, input = "", environment, li
   });
 }
 
-async function fixedRunner(node, changeId, cases, lifecycle) {
+export async function fixedRunner(node, changeId, cases, lifecycle) {
   const input = JSON.stringify({ changeId, cases });
   requireThat(Buffer.byteLength(input) <= 8192, "RUNNER_INPUT_LIMIT");
   const result = await captureChild({ executable: node,
@@ -698,13 +985,16 @@ async function approval() {
   const file = process.env.META_DEMO_APPROVAL_FILE;
   requireThat(isAbsolute(file ?? ""), "APPROVAL_FILE_REQUIRED", 503);
   const a = JSON.parse((await readPrivate(file)).toString("utf8"));
-  requireThat(exact(a, ["version", "id", "deadline", "maxAdditionalRequests", "keyFile", "nodeExecutable", "nodeSha256", "otaExecutable", "otaSha256", "sourceHashes"])
+  const keys = ["version", "id", "deadline", "maxAdditionalRequests", "keyFile", "nodeExecutable", "nodeSha256", "otaExecutable", "otaSha256", "sourceHashes"];
+  requireThat(exact(a, Object.hasOwn(a, "retainedCheckpoint") ? [...keys, "retainedCheckpoint"] : keys)
     && a.version === 1 && ID.test(a.id) && a.maxAdditionalRequests === 6
     && Number.isFinite(Date.parse(a.deadline)) && Date.parse(a.deadline) <= Date.parse(STOP_AT)
     && Date.now() < Date.parse(a.deadline) && isAbsolute(a.keyFile) && isAbsolute(a.nodeExecutable)
     && HASH.test(a.nodeSha256) && isAbsolute(a.otaExecutable) && HASH.test(a.otaSha256)
     && exact(a.sourceHashes, RUNTIME_FILES)
-    && Object.values(a.sourceHashes).every((x) => HASH.test(x)), "APPROVAL_INVALID", 503);
+    && Object.values(a.sourceHashes).every((x) => HASH.test(x))
+    && (!Object.hasOwn(a, "retainedCheckpoint") || exact(a.retainedCheckpoint, ["path", "sha256"])
+      && isAbsolute(a.retainedCheckpoint.path) && HASH.test(a.retainedCheckpoint.sha256)), "APPROVAL_INVALID", 503);
   return a;
 }
 
@@ -750,10 +1040,16 @@ async function start() {
     lifecycle, verifySources: () => verifyFiles(a),
     execute: (task, cwd) => runDeclaredVerification({ task, cwd, nodeExecutable: a.nodeExecutable,
       otaExecutable: a.otaExecutable, lifecycle }) });
-  const controller = createController({ changes, scope, ledger, lifecycle, baselineCoverage,
+  const sources = { rule: a.sourceHashes["pricing/rule.json"], original: a.sourceHashes["pricing/original.ts"],
+    candidate: a.sourceHashes["pricing/change-a.ts"], control: a.sourceHashes["pricing/change-b.ts"] };
+  const retainedCheckpoint = a.retainedCheckpoint ? await loadRetainedCheckpoint(a.retainedCheckpoint,
+    { scopeId: a.id, change: changes[0], sources }) : undefined;
+  const controller = createController({ changes, scope, ledger, lifecycle, baselineCoverage, retainedCheckpoint,
+    ruleIdentity: sources.rule, controlIdentity: sources.control, feedbackAttempts: createFeedbackAttempts(runDirectory),
     baselineIdentity: a.sourceHashes["pricing/baseline.json"], verification,
     verifySources: () => verifyFiles(a),
     provider: (packet) => museProposal(a.keyFile, packet, a.deadline, { lifecycle }),
+    feedbackProvider: (packet) => museFeedback(a.keyFile, packet, a.deadline, { lifecycle }),
     runner: (id, cases) => fixedRunner(a.nodeExecutable, id, cases, lifecycle),
     persistExport: (source) => persistRegression({ artifact: join(ROOT, "evidence/regression.test.mjs"),
       record: join(runDirectory, "current-export.json"), scopeId: a.id, source }),

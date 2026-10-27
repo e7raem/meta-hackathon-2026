@@ -16,6 +16,11 @@ customer PR, a real shop integration or production payment assurance.
    each expected total against the rule before running the new case comparison.
    Freeze acceptance, run the comparison and show expected versus actual
    pounds. A proposal that finds nothing is not a discovered bug or approval.
+   Run those same baskets against the fixed pre-reviewed correct refactor B.
+   Then optionally give Muse the bound actual results for **one feedback turn**:
+   a short explanation and zero to two additional data-only baskets. Follow-ups
+   are outcome-informed, not uncoached discovery. Review their expected totals
+   independently before running them on original/A/B. There is no recursive loop.
 3. **The test to keep.** Persist the generated regression test. Run those exact
    same bytes through declared Ota tasks in private faulty/corrected checkouts.
    Only the reviewed implementation correction changes; the original worktree,
@@ -35,7 +40,52 @@ completed selected checks, never universal correctness. Red-green requires actua
 assertion failures followed by all unskipped assertions passing, unchanged test
 hashes and successful copy cleanup. Import/setup/timeout errors are inconclusive.
 
-## Observed Full-Flow Rehearsal
+### Bounded Feedback And Retained Continuity
+
+`/api/control` executes exactly the selected accepted baskets against B; a passing
+control means **no counterexample in those cases**, not approval of the entire PR.
+`/api/feedback` accepts only a matching initial reproduced run and fresh successful
+control. Its server-built packet binds source/rule, case, run, control and provenance
+identities. The response must echo the binding/run and the complete set of actual
+fault case IDs. Muse cannot supply executable code, a repair, an arbitrary path,
+URL or command. Its explanation is interpretation, never a replacement for results.
+
+STOP with no new cases is valid. Duplicate baskets are unhelpful/inconclusive;
+wrong bindings, invented/omitted observed faults and malformed replies refuse.
+Every feedback attempt writes an exclusive durable root-proposal marker and
+reserves from the same six-total ledger before dispatch. New run, control or
+request IDs cannot reopen that allowance. Errors and uncertain outcomes are not
+retried. Initial and feedback usage/evidence are separate; unknown usage stays null.
+
+Owner approval may add exactly one optional `retainedCheckpoint: {path, sha256}`.
+This is an absolute owner-only private startup file, never a public import API.
+The bounded file must be regular, singular, owner-0400 and reached without links.
+Its exact version-1 projection contains `scopeId`, `recordedAt`, source identities
+`{rule,original,candidate,control}`, `model: {responseId,recordSha256,createdAt}`, the
+derived `proposal`, original `accepted`, `comparison`, their `recordHashes`,
+original accepted/comparison file hashes in `sourceRecordHashes`, fixed
+`proposalProvenance: "DERIVED_FROM_RETAINED_MODEL_AND_ACCEPTANCE"`, and the original
+`reviewEvidence` declaration. Record hashes are SHA-256 of each projection's
+`JSON.stringify` bytes; the model record hash identifies the separately retained
+owner evidence, not an independently fetched or authenticated provider attestation.
+The prior runtime did not save a standalone proposal file. Its projection is
+derived from the retained model's final cases and the accepted proposal reference;
+its newly computed projection hash is not called a historical proposal-file hash.
+The whole-file hash is independently pinned in owner approval. Exact sources,
+record hashes, case/rule arithmetic, record linkage and result status are rechecked.
+
+The UI prominently labels this **retained live initial evidence**, preserving its
+original IDs, operator-review origin and time. It imports no baseline/control
+success, new provider permission or named-human identity. Fresh baseline and
+fresh B control on the new source remain required before feedback. The ordinary
+initial-proposal endpoint is refused in retained mode before any reservation or
+provider dispatch, even after a fresh baseline passes. The ordinary
+fresh initial-to-feedback flow is supported, but qualifying it with mocks is not
+a fresh two-request live demonstration. Prior runtime evidence never automatically
+qualifies the new feedback implementation. Existing root regression selection
+remains separate from follow-up exploration.
+
+## Prior Full-Flow Rehearsal (Before Feedback)
 
 On 27 October 2026, the selected local flow on frozen runtime source
 `df39d0eac5104250fed4910332f86e0e72cc4201` completed in **158.41 seconds**,
@@ -85,9 +135,22 @@ write only declared ignored evidence paths and make no provider call or listener
 The live service's baseline uses `verify:baseline`; its red and green copies both
 use `verify:export`. Raw logs, counts and source/test identities are retained
 behind Evidence rather than substituted with green animations.
-The selected local checks passed 94/94: baseline 6, controller 25, delivery 5,
+The previous runtime's selected local checks passed 94/94: baseline 6, controller 25, delivery 5,
 UI 21 and separate pricing/witness controls 37. The authored offline integration
 fixtures and the real live rehearsal above remain separate evidence.
+
+The feedback candidate's selected offline qualification passed **115/115**:
+baseline 6, controller/checkpoint 36, delivery 6, UI 30, separate pricing controls
+37; zero failed/skipped/cancelled checks. This includes parsing the owner's actual
+pinned retained checkpoint against the current rule/original/A/B identities and
+real native A/B controls on authored cases. Supply both optional
+`OTA_DEMO_TEST_CHECKPOINT` and `OTA_DEMO_TEST_CHECKPOINT_SHA256` only for that
+owner-checkpoint check; without them, the controller suite has 35 synthetic checks.
+No actual checkpoint is copied into the repository or published. These results
+are not a fresh provider feedback call, browser/viewport check, timed demo or
+production qualification. New runtime adoption remains owner-controlled.
+Fresh retained-root exports/proofs append request-specific evidence records;
+they never overwrite the earlier run's historical export/proof records.
 
 ## Live Rehearsal Boundary
 
@@ -104,6 +167,7 @@ one more: five of six are consumed, with one request remaining. MUSE alone owns 
 deadline renewal/migration with immutable old history and unchanged counters.
 The app has no renewal/reset endpoint and normal startup never initializes state.
 No command or agent-safe declaration here grants service/provider authority.
+The feedback addition does not renew that window or expand the remaining allowance.
 
 After independent clearance the operator uses `ota run demo:live --agent` on
 macOS. The listener binds only `127.0.0.1:48761`; a busy port refuses. The saved

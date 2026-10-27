@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { join, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RUNTIME_FILES, createLifecycle, createPricingVerification,
-  runDeclaredVerification, parseTaskExecution, exportRegression } from "../tools/live-demo.mjs";
+  runDeclaredVerification, parseTaskExecution, exportRegression, fixedRunner } from "../tools/live-demo.mjs";
 
 // Authored offline integration fixtures, never new Muse or customer evidence.
 const SOURCE = fileURLToPath(new URL("..", import.meta.url));
@@ -54,6 +54,18 @@ test("TAP counts reject missing, duplicate and contradictory summaries", () => {
     tap().replace("1..2", "1..3"), tap().replace("# pass 0", "# pass 1")]) {
     assert.equal(parseTaskExecution({ exitCode: 1, stdout, stderr: "" }).counts, null);
   }
+});
+
+test("the fixed native runner executes identical selected cases against faulty A and correct B", async () => {
+  const lifecycle = createLifecycle();
+  const baskets = cases.map((c) => c.lines);
+  const a = await fixedRunner(process.execPath, "a", baskets, lifecycle);
+  const b = await fixedRunner(process.execPath, "b", baskets, lifecycle);
+  assert.deepEqual(a.rows.map((r) => r.original.value), [9900, 17500]);
+  assert.deepEqual(a.rows.map((r) => r.candidate.value), [9450, 17550]);
+  assert.deepEqual(b.rows.map((r) => r.original.value), [9900, 17500]);
+  assert.deepEqual(b.rows.map((r) => r.candidate.value), [9900, 17500]);
+  assert.ok([...a.rows, ...b.rows].every((r) => r.original.error === null && r.candidate.error === null));
 });
 
 test("actual nested declared Ota tasks prove baseline and identical-test red-green in owned copies", async () => {

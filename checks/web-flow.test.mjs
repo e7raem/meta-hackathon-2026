@@ -7,11 +7,12 @@
  * implementation is injected and fully mocked. No fixture encodes the
  * prepared sample's known defect or any reference repair.
  *
- * NOT_RUN: these tests are authored but have not been executed yet.
+ * Qualification results are retained separately; fixtures are not live evidence.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 import {
   API_PATHS,
@@ -28,9 +29,12 @@ import {
   validateAccepted,
   validateBaseline,
   validateComparison,
+  validateControl,
   validateExport,
+  validateFeedback,
   validateProposal,
   validateRegression,
+  validateRetainedInitial,
   validateSession,
 } from "../web/app.js";
 
@@ -39,6 +43,7 @@ const HEX_B = "b2".repeat(32);
 const HEX_C = "c3".repeat(32);
 const HEX_D = "d4".repeat(32);
 const HEX_E = "e5".repeat(32);
+const HEX_F = "f1".repeat(32);
 
 function changeEntry() {
   return {
@@ -1003,4 +1008,493 @@ test("pound input parsing and pence formatting are strict and symmetric", () => 
   assert.equal(isValidExpectedTotal(900.5), false);
   assert.equal(isValidExpectedTotal("900"), false);
   assert.equal(isValidExpectedTotal(-1), false);
+});
+
+/*
+ * Feedback/refinement fixtures. All SYNTHETIC test data: no actual model
+ * request, execution, private witness or reference repair is encoded here.
+ */
+
+function controlBody(overrides = {}) {
+  return {
+    kind: "control",
+    origin: "LOCAL_EXECUTION",
+    controlId: "ctl-1",
+    runId: "run-1",
+    acceptedId: "acc-1",
+    status: "NO_COUNTEREXAMPLE",
+    rows: [
+      {
+        caseId: "case-1",
+        expectedTotal: 900,
+        original: { value: 900, error: null },
+        candidate: { value: 900, error: null },
+      },
+      {
+        caseId: "case-2",
+        expectedTotal: 2900,
+        original: { value: 2900, error: null },
+        candidate: { value: 2900, error: null },
+      },
+    ],
+    sourceIdentities: { original: HEX_A, candidate: HEX_E, acceptedCases: HEX_C },
+    limits: ["Synthetic fixture: control over the accepted baskets only."],
+    ...overrides,
+  };
+}
+
+function followUpProposalBody(overrides = {}) {
+  return proposalBody({
+    proposalId: "prop-2",
+    callsUsed: 2,
+    cases: [
+      {
+        id: "case-3",
+        lines: [{ amount: 1500, discountEligible: true }],
+        expectedTotal: 1350,
+        rationale: "Synthetic: follow-up single eligible line.",
+      },
+    ],
+    usage: { inputTokens: 5, outputTokens: 9 },
+    ...overrides,
+  });
+}
+
+function feedbackBody(overrides = {}) {
+  return {
+    kind: "feedback",
+    origin: "FIXTURE",
+    feedbackId: "fb-1",
+    runId: "run-1",
+    controlId: "ctl-1",
+    bindingId: HEX_F,
+    status: "FOLLOW_UP_PROPOSED",
+    explanation: "Synthetic test explanation: a model interpretation of verified outputs, not authority.",
+    proposal: followUpProposalBody(),
+    usage: { inputTokens: 5, outputTokens: 9 },
+    callsUsed: 2,
+    limits: ["Synthetic fixture: one bounded feedback interaction."],
+    ...overrides,
+  };
+}
+
+function retainedInitialBody(overrides = {}) {
+  return {
+    proposal: proposalBody(),
+    accepted: acceptedBody(),
+    comparison: comparisonBody({ status: "REPRODUCED" }),
+    recordedAt: "2026-10-26T23:59:00Z",
+    recordHashes: { proposal: HEX_A, accepted: HEX_B, comparison: HEX_C },
+    ...overrides,
+  };
+}
+
+function followUpAcceptedBody(overrides = {}) {
+  return acceptedBody({
+    acceptedId: "acc-2",
+    proposalId: "prop-2",
+    acceptedCases: [
+      {
+        caseId: "case-3",
+        lines: [{ amount: 1500, discountEligible: true }],
+        expectedTotal: 1300,
+        expectationOrigin: "REVIEWER_CORRECTED",
+      },
+    ],
+    ...overrides,
+  });
+}
+
+function followUpComparisonBody(overrides = {}) {
+  return comparisonBody({
+    runId: "run-2",
+    acceptedId: "acc-2",
+    status: "NO_COUNTEREXAMPLE",
+    rows: [
+      {
+        caseId: "case-3",
+        expectedTotal: 1300,
+        original: { value: 1350, error: null },
+        candidate: { value: 1300, error: null },
+      },
+    ],
+    ...overrides,
+  });
+}
+
+function followUpControlBody(overrides = {}) {
+  return controlBody({
+    controlId: "ctl-2",
+    runId: "run-2",
+    acceptedId: "acc-2",
+    rows: [
+      {
+        caseId: "case-3",
+        expectedTotal: 1300,
+        original: { value: 1300, error: null },
+        candidate: { value: 1300, error: null },
+      },
+    ],
+    ...overrides,
+  });
+}
+
+// Journey through session, baseline, proposal, acceptance, comparison and
+// a successful correct-B control. Five POSTs: req-1 .. req-5.
+async function appAtControl(extraPlan = []) {
+  const app = makeApp([
+    () => respond(200, sessionBody()),
+    () => respond(200, baselineBody()),
+    () => respond(200, proposalBody()),
+    () => respond(200, acceptedBody()),
+    () => respond(200, comparisonBody({ status: "REPRODUCED" })),
+    () => respond(200, controlBody()),
+    ...extraPlan,
+  ]);
+  await app.store.loadSession();
+  await app.store.runBaseline();
+  await app.store.propose();
+  app.store.confirmReview(true);
+  await app.store.accept();
+  await app.store.compare();
+  assert.deepEqual(await app.store.runControl(), { ok: true });
+  return app;
+}
+
+test("control is gated on baseline and comparison, runs once, and fails closed on mismatched echoes", async () => {
+  const gated = makeApp([
+    () => respond(200, sessionBody()),
+    () => respond(200, baselineBody()),
+  ]);
+  assert.deepEqual(await gated.store.runControl(), { ok: false, reason: "no_session" });
+  await gated.store.loadSession();
+  assert.deepEqual(await gated.store.runControl(), { ok: false, reason: "baseline_required" });
+  await gated.store.runBaseline();
+  assert.deepEqual(await gated.store.runControl(), { ok: false, reason: "no_comparison" });
+  assert.equal(gated.calls.length, 2, "no control fetch may happen while gated");
+
+  const { store, calls } = await appAtControl();
+  assert.deepEqual(JSON.parse(calls[5].options.body), { runId: "run-1", requestId: "req-5" });
+  assert.equal(calls[5].url, API_PATHS.control);
+  assert.equal(store.getState().control.status, "NO_COUNTEREXAMPLE");
+  assert.deepEqual(await store.runControl(), { ok: false, reason: "already_run" });
+  assert.equal(calls.length, 6, "a completed control is not re-run");
+
+  const wrongAccepted = makeApp([
+    () => respond(200, sessionBody()),
+    () => respond(200, baselineBody()),
+    () => respond(200, proposalBody()),
+    () => respond(200, acceptedBody()),
+    () => respond(200, comparisonBody()),
+    () => respond(200, controlBody({ acceptedId: "acc-other" })),
+  ]);
+  await wrongAccepted.store.loadSession();
+  await wrongAccepted.store.runBaseline();
+  await wrongAccepted.store.propose();
+  wrongAccepted.store.confirmReview(true);
+  await wrongAccepted.store.accept();
+  await wrongAccepted.store.compare();
+  const mismatch = await wrongAccepted.store.runControl();
+  assert.equal(mismatch.ok, false);
+  assert.equal(wrongAccepted.store.getState().control, null, "a mismatched control is never stored");
+  assert.match(wrongAccepted.store.getState().errors.control, /acceptedId/);
+
+  const wrongRows = controlBody();
+  wrongRows.rows[0].expectedTotal = 1000;
+  const rowApp = makeApp([
+    () => respond(200, sessionBody()),
+    () => respond(200, baselineBody()),
+    () => respond(200, proposalBody()),
+    () => respond(200, acceptedBody()),
+    () => respond(200, comparisonBody()),
+    () => respond(200, wrongRows),
+  ]);
+  await rowApp.store.loadSession();
+  await rowApp.store.runBaseline();
+  await rowApp.store.propose();
+  rowApp.store.confirmReview(true);
+  await rowApp.store.accept();
+  await rowApp.store.compare();
+  assert.equal((await rowApp.store.runControl()).ok, false);
+  assert.equal(rowApp.store.getState().control, null);
+  assert.match(rowApp.store.getState().errors.control, /do not match/);
+
+  const wrongRun = makeApp([
+    () => respond(200, sessionBody()),
+    () => respond(200, baselineBody()),
+    () => respond(200, proposalBody()),
+    () => respond(200, acceptedBody()),
+    () => respond(200, comparisonBody()),
+    () => respond(200, controlBody({ runId: "run-other" })),
+  ]);
+  await wrongRun.store.loadSession();
+  await wrongRun.store.runBaseline();
+  await wrongRun.store.propose();
+  wrongRun.store.confirmReview(true);
+  await wrongRun.store.accept();
+  await wrongRun.store.compare();
+  assert.equal((await wrongRun.store.runControl()).ok, false);
+  assert.match(wrongRun.store.getState().errors.control, /runId/);
+});
+
+test("control and feedback validators reject out-of-domain shapes instead of coercing", () => {
+  assert.equal(validateControl(controlBody()).ok, true);
+  assert.equal(validateControl(controlBody({ origin: "LIVE" })).ok, false,
+    "control origin must be LOCAL_EXECUTION, never a model origin");
+  assert.equal(validateControl(controlBody({ status: "GREEN" })).ok, false);
+  const missingIdentity = controlBody();
+  delete missingIdentity.sourceIdentities.acceptedCases;
+  assert.equal(validateControl(missingIdentity).ok, false);
+  assert.equal(validateControl(controlBody({ rows: [] })).ok, false);
+  assert.equal(validateControl(controlBody({ limits: "none" })).ok, false);
+
+  assert.equal(validateFeedback(feedbackBody()).ok, true);
+  assert.equal(validateFeedback(feedbackBody({ origin: "RECORDED" })).ok, false,
+    "feedback origin stays literal LIVE or FIXTURE");
+  assert.equal(validateFeedback(feedbackBody({ bindingId: HEX_F.toUpperCase() })).ok, false,
+    "bindingId must be lowercase sha256");
+  assert.equal(validateFeedback(feedbackBody({ explanation: "x".repeat(601) })).ok, false,
+    "explanation is bounded at 600 characters");
+  assert.equal(validateFeedback(feedbackBody({ explanation: "x".repeat(600) })).ok, true);
+  assert.equal(validateFeedback(feedbackBody({ proposal: null })).ok, false,
+    "FOLLOW_UP_PROPOSED requires a proposal");
+  assert.equal(validateFeedback(feedbackBody({ status: "STOPPED", proposal: null })).ok, true);
+  assert.equal(validateFeedback(feedbackBody({ status: "STOPPED" })).ok, false,
+    "STOPPED must carry a null proposal");
+  assert.equal(validateFeedback(feedbackBody({ status: "INCONCLUSIVE" })).ok, false,
+    "INCONCLUSIVE must carry a null proposal");
+  assert.equal(validateFeedback(
+    feedbackBody({ proposal: followUpProposalBody({ cases: proposalBody().cases.concat([{
+      id: "case-9",
+      lines: [{ amount: 100, discountEligible: true }],
+      expectedTotal: 90,
+      rationale: "Synthetic: third case.",
+    }]) }) }),
+  ).ok, false, "a follow-up proposes at most 2 cases");
+  assert.equal(validateFeedback(feedbackBody({ usage: { inputTokens: "5", outputTokens: 9 } })).ok, false);
+  assert.equal(validateFeedback(feedbackBody({ usage: { inputTokens: null, outputTokens: null } })).ok, true,
+    "null token usage means UNKNOWN and stays valid");
+  assert.equal(validateFeedback(feedbackBody({ callsUsed: -1 })).ok, false);
+
+  assert.equal(validateRetainedInitial(retainedInitialBody()).ok, true);
+  assert.equal(validateRetainedInitial(
+    retainedInitialBody({ comparison: comparisonBody({ acceptedId: "acc-other" }) }),
+  ).ok, false, "retained comparison must reference the retained acceptance");
+  assert.equal(validateRetainedInitial(
+    retainedInitialBody({ accepted: acceptedBody({ proposalId: "prop-other" }) }),
+  ).ok, false, "retained acceptance must reference the retained proposal");
+  const badHash = retainedInitialBody();
+  badHash.recordHashes.comparison = "nothex";
+  assert.equal(validateRetainedInitial(badHash).ok, false);
+  const badRow = retainedInitialBody();
+  badRow.comparison.rows[0].expectedTotal = 1000;
+  assert.equal(validateRetainedInitial(badRow).ok, false,
+    "retained comparison rows must match the retained accepted totals");
+});
+
+test("feedback is a single attempt: a failed request consumes it and refresh never re-enables it", async () => {
+  const noControl = makeApp([() => respond(200, sessionBody())]);
+  await noControl.store.loadSession();
+  assert.deepEqual(await noControl.store.requestFeedback(), { ok: false, reason: "no_control" });
+
+  const { store, calls } = await appAtControl([
+    () => respond(503, { error: { code: "provider_busy", message: "try later" } }),
+    () => respond(200, sessionBody({ callsUsed: 1 })),
+  ]);
+  const failed = await store.requestFeedback();
+  assert.equal(failed.ok, false);
+  const afterFail = store.getState();
+  assert.equal(afterFail.feedback, null, "a failed feedback is never synthesized into a result");
+  assert.equal(afterFail.feedbackAttempted, true, "the attempt is consumed on dispatch, even on failure");
+  assert.equal(afterFail.budgetKnown, false, "a failed model call leaves the budget unknown");
+  assert.match(afterFail.errors.feedback, /provider_busy/);
+
+  assert.deepEqual(await store.requestFeedback(), { ok: false, reason: "already_attempted" });
+  assert.equal(calls.length, 7, "a consumed attempt must not fetch again");
+
+  assert.deepEqual(await store.refreshUsage(), { ok: true });
+  assert.equal(store.getState().budgetKnown, true);
+  assert.deepEqual(await store.requestFeedback(), { ok: false, reason: "already_attempted" },
+    "an explicit usage refresh must not re-enable the consumed attempt");
+  assert.equal(calls.length, 8, "only the read-only session refresh was added");
+});
+
+test("follow-up flow needs its own review, keeps root records, and never recurses into feedback", async () => {
+  const { store, calls } = await appAtControl([
+    () => respond(200, feedbackBody()),
+    () => respond(200, followUpAcceptedBody()),
+    () => respond(200, followUpComparisonBody()),
+    () => respond(200, followUpControlBody()),
+  ]);
+  assert.deepEqual(await store.requestFeedback(), { ok: true });
+  assert.deepEqual(JSON.parse(calls[6].options.body),
+    { runId: "run-1", controlId: "ctl-1", requestId: "req-6" });
+  const seeded = store.getState();
+  assert.equal(seeded.session.callsUsed, 2, "feedback consumed a confirmed budget reservation");
+  assert.equal(seeded.feedback.status, "FOLLOW_UP_PROPOSED");
+  assert.equal(seeded.followUp.proposal.proposalId, "prop-2");
+  assert.equal(seeded.followUp.reviewedConfirmed, false,
+    "a follow-up starts unreviewed regardless of the earlier review");
+
+  assert.deepEqual(await store.acceptFollowUp(), { ok: false, reason: "not_reviewed" });
+  assert.deepEqual(store.setFollowUpExpectation("case-3", "nonsense"), { ok: true });
+  store.confirmFollowUpReview(true);
+  assert.deepEqual(await store.acceptFollowUp(), { ok: false, reason: "invalid_expectation" });
+  assert.deepEqual(store.setFollowUpExpectation("case-3", "13.00"), { ok: true });
+  assert.equal(store.getState().followUp.reviewedConfirmed, false,
+    "editing a follow-up expectation resets its review confirmation");
+  store.confirmFollowUpReview(true);
+  assert.deepEqual(await store.acceptFollowUp(), { ok: true });
+  assert.deepEqual(JSON.parse(calls[7].options.body), {
+    proposalId: "prop-2",
+    expectations: [{ caseId: "case-3", expectedTotal: 1300 }],
+    reviewed: true,
+    requestId: "req-7",
+  });
+  assert.equal(store.getState().followUp.accepted.acceptedCases[0].expectationOrigin,
+    "REVIEWER_CORRECTED", "the edited value stays labelled as reviewer corrected");
+  assert.deepEqual(store.setFollowUpExpectation("case-3", "14.00"),
+    { ok: false, reason: "frozen" }, "follow-up acceptance freezes its expectations");
+
+  assert.deepEqual(await store.compareFollowUp(), { ok: true });
+  assert.deepEqual(JSON.parse(calls[8].options.body), { acceptedId: "acc-2", requestId: "req-8" });
+  assert.deepEqual(await store.runFollowUpControl(), { ok: true });
+  assert.deepEqual(JSON.parse(calls[9].options.body), { runId: "run-2", requestId: "req-9" });
+
+  const state = store.getState();
+  assert.equal(state.comparison.runId, "run-1", "the root comparison is never replaced");
+  assert.equal(state.control.controlId, "ctl-1", "the root control is never replaced");
+  assert.equal(state.followUp.comparison.runId, "run-2");
+  assert.equal(state.followUp.control.controlId, "ctl-2");
+
+  assert.deepEqual(await store.requestFeedback(), { ok: false, reason: "already_attempted" },
+    "feedback is never requested recursively from a follow-up");
+  assert.equal(calls.length, 10);
+});
+
+test("a STOP or mismatched feedback stays honest: no follow-up, no relabelling, fail closed", async () => {
+  const stopped = await appAtControl([
+    () => respond(200, feedbackBody({ status: "STOPPED", proposal: null })),
+  ]);
+  assert.deepEqual(await stopped.store.requestFeedback(), { ok: true });
+  const stopState = stopped.store.getState();
+  assert.equal(stopState.feedback.status, "STOPPED");
+  assert.equal(stopState.followUp, null, "a stop produces no follow-up flow");
+  assert.equal(stopState.feedbackAttempted, true);
+
+  const mismatched = await appAtControl([
+    () => respond(200, feedbackBody({ controlId: "ctl-other" })),
+  ]);
+  const result = await mismatched.store.requestFeedback();
+  assert.equal(result.ok, false);
+  assert.equal(mismatched.store.getState().feedback, null);
+  assert.match(mismatched.store.getState().errors.feedback, /identities/);
+  assert.equal(mismatched.store.getState().followUp, null, "a mismatched response seeds nothing");
+
+  const badBinding = await appAtControl([
+    () => respond(200, feedbackBody({ bindingId: "short" })),
+  ]);
+  assert.equal((await badBinding.store.requestFeedback()).ok, false);
+  assert.equal(badBinding.store.getState().feedback, null);
+});
+
+test("retained initial evidence blocks a new initial proposal but still gates on a fresh baseline", async () => {
+  const { store, calls } = makeApp([
+    () => respond(200, sessionBody({ retainedInitial: retainedInitialBody() })),
+    () => respond(200, baselineBody()),
+    () => respond(200, controlBody()),
+    () => respond(200, feedbackBody({
+      status: "INCONCLUSIVE",
+      proposal: null,
+      callsUsed: 1,
+    })),
+  ]);
+  assert.deepEqual(await store.loadSession(), { ok: true });
+  assert.equal(store.getState().session.retainedInitial.recordedAt, "2026-10-26T23:59:00Z");
+
+  assert.deepEqual(await store.propose(), { ok: false, reason: "retained_initial" },
+    "retained records never trigger a new initial model request");
+  assert.deepEqual(await store.runControl(), { ok: false, reason: "baseline_required" },
+    "retained evidence does not replace a fresh baseline PASS");
+  assert.deepEqual(await store.runBaseline(), { ok: true });
+  assert.deepEqual(await store.runControl(), { ok: true });
+  assert.deepEqual(JSON.parse(calls[2].options.body), { runId: "run-1", requestId: "req-2" },
+    "the control targets the retained comparison run");
+  assert.deepEqual(await store.requestFeedback(), { ok: true });
+  assert.deepEqual(JSON.parse(calls[3].options.body),
+    { runId: "run-1", controlId: "ctl-1", requestId: "req-3" });
+  const state = store.getState();
+  assert.equal(state.feedback.status, "INCONCLUSIVE");
+  assert.equal(state.followUp, null, "an inconclusive feedback manufactures no finding");
+
+  const badSession = makeApp([
+    () => respond(200, sessionBody({
+      retainedInitial: retainedInitialBody({ comparison: comparisonBody({ acceptedId: "acc-other" }) }),
+    })),
+  ]);
+  const rejected = await badSession.store.loadSession();
+  assert.equal(rejected.ok, false, "broken retained linkage fails the whole session load");
+  assert.equal(badSession.store.getState().session, null);
+});
+
+test("retained root evidence can export and prove a fresh same-test regression after fresh baseline", async () => {
+  const app = makeApp([
+    () => respond(200, sessionBody({ retainedInitial: retainedInitialBody() })),
+    () => respond(200, baselineBody()),
+    () => respond(200, exportBody()),
+    () => respond(200, regressionBody()),
+  ]);
+  await app.store.loadSession();
+  assert.deepEqual(await app.store.exportTest(), { ok: false, reason: "baseline_required" });
+  await app.store.runBaseline();
+  assert.deepEqual(await app.store.exportTest(), { ok: true });
+  assert.equal(JSON.parse(app.calls[2].options.body).runId, "run-1");
+  assert.deepEqual(await app.store.runRegression(), { ok: true });
+  assert.equal(JSON.parse(app.calls[3].options.body).runId, "run-1");
+  assert.equal(app.store.getState().regression.status, "RED_THEN_GREEN");
+  assert.equal(app.store.getState().comparison, null, "historical comparison was not restamped as a new one");
+});
+
+test("server-persisted feedback attempt survives load and no contradictory control opens feedback", async () => {
+  const app = makeApp([
+    () => respond(200, sessionBody({ retainedInitial: retainedInitialBody(), feedbackAttempted: true })),
+    () => respond(200, baselineBody()),
+    () => respond(200, controlBody()),
+  ]);
+  await app.store.loadSession(); await app.store.runBaseline(); await app.store.runControl();
+  assert.deepEqual(await app.store.requestFeedback(), { ok: false, reason: "already_attempted" });
+  assert.equal(app.calls.length, 3);
+  assert.equal(validateSession(sessionBody({ feedbackAttempted: "false" })).ok, false);
+  const contradiction = controlBody(); contradiction.rows[0].candidate.value = 800;
+  assert.equal(validateControl(contradiction).ok, false);
+  const unknown = await appAtControl();
+  unknown.store.getState().baseline.status = "FAIL";
+  assert.deepEqual(await unknown.store.requestFeedback(), { ok: false, reason: "baseline_required" });
+  assert.equal(unknown.store.getState().feedbackAttempted, false, "no attempt on a failed fresh baseline");
+  unknown.store.getState().baseline.status = "PASS";
+  unknown.store.getState().control.status = "INCONCLUSIVE";
+  assert.deepEqual(await unknown.store.requestFeedback(), { ok: false, reason: "matching_control_required" });
+  assert.equal(unknown.calls.length, 6);
+});
+
+test("new source stays text-only: no unsafe rendering sinks, model text treated as plain data", async () => {
+  const appSource = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  for (const sink of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"]) {
+    assert.equal(appSource.includes(sink), false, `app.js must not use ${sink}`);
+  }
+  assert.equal(appSource.includes("eval" + "("), false, "app.js must not evaluate strings");
+
+  const htmlSource = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
+  assert.equal(/onclick=/i.test(htmlSource), false, "no inline handlers");
+  assert.equal(/javascript:/i.test(htmlSource), false, "no javascript: URLs");
+  assert.equal(htmlSource.includes('for="followup-reviewed-checkbox"'), true,
+    "the follow-up review checkbox keeps an accessible label");
+
+  const hostile = validateFeedback(feedbackBody({
+    status: "STOPPED",
+    proposal: null,
+    explanation: "<script>synthetic</script> plain text explanation",
+  }));
+  assert.equal(hostile.ok, true,
+    "markup in an explanation is accepted as bounded plain text, to be rendered via textContent only");
 });

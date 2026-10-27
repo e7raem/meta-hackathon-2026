@@ -19,6 +19,7 @@
         <span id="session-meta" class="session-meta"></span>
       </p>
       <p id="session-error" class="status error" role="status" aria-live="polite" hidden></p>
+      <p id="retained-banner" class="retained-banner" hidden></p>
     </header>
 
     <ol class="journey">
@@ -40,6 +41,7 @@
         <p class="step-hint">
           Check Muse's expected totals against the rule before accepting and running its baskets.
         </p>
+        <div id="retained-panel" class="panel"></div>
         <button type="button" id="propose-button" disabled>Ask Muse for breaking baskets</button>
         <p id="propose-status" class="status" role="status" aria-live="polite"></p>
         <div id="proposal-panel" class="panel"></div>
@@ -54,6 +56,32 @@
         <button type="button" id="compare-button" disabled>Run comparison</button>
         <p id="compare-status" class="status" role="status" aria-live="polite"></p>
         <div id="comparison-panel" class="panel"></div>
+        <button type="button" id="control-button" disabled>Check the corrected version (control)</button>
+        <p id="control-status" class="status" role="status" aria-live="polite"></p>
+        <div id="control-panel" class="panel"></div>
+        <button type="button" id="feedback-button" disabled>Send verified results back to Muse (one request)</button>
+        <p id="feedback-status" class="status" role="status" aria-live="polite"></p>
+        <div id="feedback-panel" class="panel"></div>
+        <section id="followup-section" class="followup" hidden aria-label="Follow-up basket from Muse feedback">
+          <h3>Follow-up basket</h3>
+          <p class="step-hint">
+            Review this follow-up expectation against the written rule, independently of any result shown above.
+          </p>
+          <div id="followup-rows" class="expectation-rows"></div>
+          <p class="review-confirm">
+            <input type="checkbox" id="followup-reviewed-checkbox" disabled>
+            <label for="followup-reviewed-checkbox">I checked each follow-up expected total against the written rule.</label>
+          </p>
+          <button type="button" id="followup-accept-button" disabled>Accept follow-up expectations</button>
+          <p id="followup-accept-status" class="status" role="status" aria-live="polite"></p>
+          <div id="followup-accepted-panel" class="panel"></div>
+          <button type="button" id="followup-compare-button" disabled>Run follow-up comparison</button>
+          <p id="followup-compare-status" class="status" role="status" aria-live="polite"></p>
+          <div id="followup-compare-panel" class="panel"></div>
+          <button type="button" id="followup-control-button" disabled>Check the corrected version on this basket</button>
+          <p id="followup-control-status" class="status" role="status" aria-live="polite"></p>
+          <div id="followup-control-panel" class="panel"></div>
+        </section>
       </li>
 
       <li class="step" id="stage-test">
@@ -79,7 +107,10 @@
         only. NO_COUNTEREXAMPLE means these baskets found no difference — it is
         not proof the change is correct for every basket, and nothing here
         approves a merge or claims production readiness. If Muse proposes no
-        cases, the result is inconclusive, not approval. Accepting here records
+        cases, the result is inconclusive, not approval. The corrected-version
+        control is a fixed pre-reviewed correction, never a model-generated
+        repair, and Muse's feedback explanation is a model interpretation of
+        verified outputs, not authority or proof. Accepting here records
         an operator decision in this session; it does not verify any named
         person's identity.
       </p>
