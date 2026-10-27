@@ -548,7 +548,8 @@ async function start() {
   const changes = [];
   for (const id of ["a", "b"]) {
     const candidateSource = await readFile(join(ROOT, "pricing/change-" + id + ".ts"), "utf8");
-    changes.push({ id, title: "Prepared change " + id.toUpperCase(), rule, originalSource, candidateSource,
+    changes.push({ id, title: id === "a" ? "Move the voucher before the 10% discount"
+      : "Combine checkout calculations into one loop", rule, originalSource, candidateSource,
       originalSha256: sha(originalSource), candidateSha256: sha(candidateSource),
       diff: "ORIGINAL\n" + originalSource + "\nPROPOSED\n" + candidateSource });
   }

@@ -3,18 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pricing Change Reviewer</title>
+  <title>Checkout Code Reviewer</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
   <main id="app">
     <header class="masthead">
-      <p class="kicker">Pricing regression review</p>
-      <h1>Check a pricing change before you trust it</h1>
+      <p class="kicker">Checkout code review</p>
+      <h1>Can this checkout rewrite charge customers the wrong amount?</h1>
       <p class="lede">
-        Pick a prepared change, let Muse propose verification cases, confirm the
-        expected totals against the written rule, then compare the original and
-        candidate implementations and export a runnable regression test.
+        A developer has rewritten an online shop's checkout code. The shop must
+        take 10% off eligible items, then subtract a &pound;5 voucher only when
+        their discounted subtotal reaches &pound;100. Choose a rewrite below and
+        test whether it still follows that rule.
       </p>
       <p class="session-line">
         <span id="mode-badge" class="badge offline">NO SESSION</span>
@@ -25,8 +26,8 @@
 
     <ol class="journey">
       <li class="step" id="step-select">
-        <h2>Select a change</h2>
-        <p class="step-hint">Read the rule and the proposed diff before going further.</p>
+        <h2>Choose a checkout-code rewrite</h2>
+        <p class="step-hint">Change A moves the voucher before the 10% discount. Change B combines the checkout calculations into one loop. Both are prepared sample changes, not a real shop's code.</p>
         <div id="change-options" class="change-options" role="radiogroup" aria-label="Prepared changes"></div>
         <div id="change-detail" class="change-detail"></div>
       </li>
