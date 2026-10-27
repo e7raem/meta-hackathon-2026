@@ -103,16 +103,34 @@ The selected new results are supported by retained execution/model records:
   `61f707ad9ca28df195d18203cf4cbc454a39ec97ff0d262f18b67e5ee0803082`.
   Fresh declared native verification returned red: exit1/two assertion failures;
   green: exit0/two passes, no skips/cancellations, same test bytes. The correction
-  remained pre-reviewed, not Muse-generated. The retained proof reports owned-copy
-  cleanup; independent reconciliation is still pending.
+  remained pre-reviewed, not Muse-generated. MUSE's reconciliation and VLAD's
+  independent evidence review confirmed the owned verification directories absent.
 
 The timestamped browser capture spans **135.915 seconds / 19 frames**. MUSE
 observed document width equal to scrollWidth at actual 530px, 375px and 1265px
 viewports, with narrow code scrolling internally. These are MUSE's browser
-observations, not a second independent DOM review. Narrated video editing,
-full source/budget reconciliation and independent live-evidence review remain
-pending. The capture is not a finished voiced submission film. All six requests
-are consumed; no further provider call is available or authorized.
+observations, not a second independent DOM review. MUSE reconciled all thirteen
+runtime pins and the preserved five-reservation prefix plus request six. VLAD's
+independent live-evidence review reported no material findings and accepted the
+bounded STOP/control/same-test result, not general correctness or live follow-ups.
+All six requests are consumed; no further provider call is available or authorized.
+
+### Review Video
+
+The local review copy is complete: `evidence/break-this-pr-feedback-demo.mp4`,
+**168 seconds (2:48)**, H.264 1280x720 at 24fps, AAC narration and English soft
+subtitles. The voice is **synthetic macOS Daniel, English UK, not Bobai**. It uses
+twelve actual captured browser-state shots with edited cuts/holds and shortened
+waiting; it is **not a continuous full-motion recording**. The raw capture's
+135.915-second timing remains separate from the edited video's duration.
+
+SHA-256: `c473cae4e14a902a20a2ffdeda60ce5701276ef8e9cdfb9b3d31ef5db743a19d`.
+MUSE checked full decode and encoded frames at 100s/150s; the copied file's digest
+matches. The video is an ignored local review artifact, not committed, hosted,
+uploaded or submitted. It demonstrates the accepted STOP branch only; there was
+no live follow-up-case generation/execution. Review-copy readiness is not a merge,
+identity-attestation or submission decision. Process shutdown is a separate
+operator-owned action, not established by the video or evidence review.
 
 ## Prior Full-Flow Rehearsal (Before Feedback)
 
