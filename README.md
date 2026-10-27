@@ -101,8 +101,9 @@ the offline suite are fixtures, not fresh Muse results.
 
 The browser UI is in [`web/`](web/), served by
 [`tools/live-demo.mjs`](tools/live-demo.mjs) on `http://127.0.0.1:48761`.
-Live startup still requires project-specific local configuration and a valid
-demo window; a fresh clone does not yet have a one-command live setup.
+The recorded live window ended on October 27, 2026 at 14:00 UTC. This version
+blocks startup after that fixed source deadline; configuration alone cannot
+reopen it. A new live demo requires a reviewed source and configuration update.
 Use the offline commands above to reproduce the test coverage without provider
 credentials. Opening the HTML file alone does not start the backend.
 
