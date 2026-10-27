@@ -67,7 +67,7 @@ The reference environment is **macOS on Apple Silicon, Node.js 24.22.1 and
 version and uses existing tools; there are no npm dependencies to install.
 
 ```sh
-git clone https://github.com/ota-run/meta-hackathon-2026.git
+git clone https://github.com/e7raem/meta-hackathon-2026.git
 cd meta-hackathon-2026
 
 ota validate
