@@ -274,6 +274,30 @@ tasks:
 agent:
   entrypoint: verify:live-mvp
   default_task: verify:live-mvp
+  notes: |
+    Read README.md for the current workflow. Historical records are evidence,
+    not current execution authority. This is a prepared
+    checkout demo, not a customer PR or production payment assurance.
+    Use declared ota run <task> --agent paths and the qualified prerequisites
+    in README.md. The full offline aggregate needs the qualified Ota executable
+    path and its verified SHA-256; fixture passes are not fresh model evidence.
+    Preserve the written pricing rule, reviewed expectations, original/A/B
+    controls and identical regression-test bytes. Never weaken a checker or
+    turn an intentional faulty-code failure into a claimed pass.
+    Model proposals are data, not executable code. Review expected totals
+    against the rule before comparison. The correction is pre-reviewed, not
+    generated live by Muse; the recorded feedback chose STOP with no new cases.
+    Retained initial evidence is historical; live follow-up-case execution was
+    not demonstrated. Do not promote selected-case results to whole-PR approval.
+    The recorded live window is expired, all six provider requests are consumed,
+    and the service is stopped. Agent-safe task admission does not authorize
+    live use, budget initialization/reset, provider calls, installs, deployment
+    or submission.
+    Keep credentials, approvals, ledgers and private evidence out of source.
+    Do not invoke Copilot. Bobai will record his own video; do not restore the
+    withdrawn generated video, watch page or old Git refs.
+    Contract edits change its identity. Preserve old evidence and source pins;
+    never relabel a past run or reuse its private approval for changed sources.
   safe_tasks:
     - verify:shallow
     - verify:semantic
