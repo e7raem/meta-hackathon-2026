@@ -321,11 +321,11 @@ test("shutdown during credential loading prevents HTTPS dispatch and clears owne
 test("response error, aborted and premature close settle once and retain consumed reservation", async () => {
   for (const event of ["error", "aborted", "close"]) {
     const req = new EventEmitter(), res = new EventEmitter();
-    let dispatches = 0, destroyed = false;
+    let dispatches = 0, destroyed = false, requestBody;
     req.destroy = () => {
       if (!destroyed) { destroyed = true; queueMicrotask(() => req.emit("close")); }
     };
-    req.end = () => {};
+    req.end = (body) => { requestBody = JSON.parse(body); };
     res.statusCode = 200; res.complete = false;
     const f = fixture({ provider: (packet) => museProposal("unused-fixture-path", packet, scope.deadline, {
       now: () => NOW,
@@ -344,6 +344,11 @@ test("response error, aborted and premature close settle once and retain consume
     await assert.rejects(() => f.controller.action("/api/propose",
       { changeId: "a", requestId: "stream-" + event }), /PROVIDER_FAILED_CONSUMED/);
     assert.equal(dispatches, 1); assert.equal(f.calls.reservations, 1);
+    assert.equal(requestBody.max_output_tokens, 4096);
+    assert.equal(requestBody.model, "muse-spark-1.3");
+    assert.equal(requestBody.store, false);
+    assert.equal(requestBody.stream, false);
+    assert.deepEqual(requestBody.tools, []);
     assert.equal(f.calls.retained[0].value.outcome, "FAILED_OR_UNKNOWN_CONSUMED");
     assert.equal(destroyed, true);
   }

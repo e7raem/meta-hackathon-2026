@@ -420,7 +420,7 @@ export async function museProposal(keyFile, packet, deadline, {
     + JSON.stringify(packet);
   requireThat(Buffer.byteLength(input) <= 16384, "PACKET_TOO_LARGE");
   const body = JSON.stringify({ model: MODEL, input, store: false, stream: false, tools: [],
-    max_output_tokens: 2000, text: { format: { type: "json_schema", name: "pricing_cases",
+    max_output_tokens: 4096, text: { format: { type: "json_schema", name: "pricing_cases",
       strict: true, schema: modelSchema } } });
     return await new Promise((accept, reject) => {
       let connectTimer, req;
