@@ -3,20 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Checkout Code Reviewer</title>
+  <title>Break This PR — find checkout bugs before release</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
   <main id="app">
     <header class="masthead">
-      <p class="kicker">Checkout code review</p>
-      <h1>Can this checkout rewrite charge customers the wrong amount?</h1>
+      <p class="kicker">Break This PR · Prepared sample PR</p>
+      <h1>Find checkout bugs before release.</h1>
       <p class="lede">
-        A developer has rewritten an online shop's checkout code. The shop must
-        take 10% off eligible items, then subtract a &pound;5 voucher only when
-        their discounted subtotal reaches &pound;100. Choose a rewrite below and
-        test whether it still follows that rule. This sample uses pence: 10000
-        represents &pound;100.
+        Review a sample checkout rewrite, ask Muse for a missing basket, and keep the regression test.
       </p>
       <p class="session-line">
         <span id="mode-badge" class="badge offline">NO SESSION</span>
@@ -26,28 +22,27 @@
     </header>
 
     <ol class="journey">
-      <li class="step" id="step-select">
-        <h2>Choose a checkout-code rewrite</h2>
-        <p class="step-hint">Change A moves the voucher before the 10% discount. Change B combines the checkout calculations into one loop. Both are prepared sample changes, not a real shop's code.</p>
-        <div id="change-options" class="change-options" role="radiogroup" aria-label="Prepared changes"></div>
-        <div id="change-detail" class="change-detail"></div>
+      <li class="step" id="stage-change">
+        <h2>The code change</h2>
+        <h3 id="pr-title" class="pr-title"></h3>
+        <p class="rule-summary">10% off eligible items, then one &pound;5 voucher if their discounted subtotal reaches &pound;100; full-price items stay unchanged.</p>
+        <p class="step-hint">
+          Run six checks: three ordinary baskets against both versions.
+        </p>
+        <button type="button" id="baseline-button" disabled>Run baseline tests</button>
+        <p id="baseline-status" class="status" role="status" aria-live="polite"></p>
+        <div id="baseline-panel" class="panel"></div>
+        <div id="change-panel" class="change-detail"></div>
       </li>
 
-      <li class="step" id="step-propose">
-        <h2>Ask Muse for verification cases</h2>
-        <p class="step-hint">Muse proposes up to three cases with expected totals. Nothing is executed at this step.</p>
-        <button type="button" id="propose-button" disabled>Propose cases</button>
+      <li class="step" id="stage-basket">
+        <h2>The breaking basket</h2>
+        <p class="step-hint">
+          Check Muse's expected totals against the rule before accepting and running its baskets.
+        </p>
+        <button type="button" id="propose-button" disabled>Ask Muse for breaking baskets</button>
         <p id="propose-status" class="status" role="status" aria-live="polite"></p>
         <div id="proposal-panel" class="panel"></div>
-      </li>
-
-      <li class="step" id="step-validate">
-        <h2>Validate the expectations</h2>
-        <p class="step-hint">
-          Check every expected total against the rule yourself. Edit any value that is wrong,
-          then confirm you reviewed them. Edited values are recorded as reviewer corrections,
-          not as Muse discoveries.
-        </p>
         <div id="expectation-rows" class="expectation-rows"></div>
         <p class="review-confirm">
           <input type="checkbox" id="reviewed-checkbox" disabled>
@@ -56,31 +51,39 @@
         <button type="button" id="accept-button" disabled>Accept expectations</button>
         <p id="accept-status" class="status" role="status" aria-live="polite"></p>
         <div id="accepted-panel" class="panel"></div>
-      </li>
-
-      <li class="step" id="step-compare">
-        <h2>Compare original and candidate</h2>
-        <p class="step-hint">The backend runs both implementations against the accepted cases. Expectations are locked first.</p>
         <button type="button" id="compare-button" disabled>Run comparison</button>
         <p id="compare-status" class="status" role="status" aria-live="polite"></p>
         <div id="comparison-panel" class="panel"></div>
       </li>
 
-      <li class="step" id="step-export">
-        <h2>Export a regression test</h2>
-        <p class="step-hint">The accepted cases become a runnable test so this check can be repeated.</p>
-        <button type="button" id="export-button" disabled>Export regression test</button>
+      <li class="step" id="stage-test">
+        <h2>The test to keep</h2>
+        <p class="step-hint">
+          Keep the same test red on faulty code and green on the pre-reviewed correction.
+        </p>
+        <button type="button" id="export-button" disabled>Keep as regression test</button>
         <p id="export-status" class="status" role="status" aria-live="polite"></p>
         <div id="export-panel" class="panel"></div>
+        <button type="button" id="regression-button" disabled>Prove it red → green</button>
+        <p id="regression-status" class="status" role="status" aria-live="polite"></p>
+        <div id="regression-panel" class="panel"></div>
       </li>
     </ol>
 
     <footer class="endnote">
+      <details>
+      <summary>Evidence and limits</summary>
       <p>
-        This reviewer shows what the backend reports for the selected cases only.
-        A green comparison is evidence for those cases, not proof the change is
-        correct for every basket, and it does not approve any merge or deployment.
+        This is a prepared sample, not a real shop or incoming third-party PR.
+        This reviewer shows what the backend reports for the accepted baskets
+        only. NO_COUNTEREXAMPLE means these baskets found no difference — it is
+        not proof the change is correct for every basket, and nothing here
+        approves a merge or claims production readiness. If Muse proposes no
+        cases, the result is inconclusive, not approval. Accepting here records
+        an operator decision in this session; it does not verify any named
+        person's identity.
       </p>
+      </details>
     </footer>
   </main>
   <script type="module" src="./app.js"></script>

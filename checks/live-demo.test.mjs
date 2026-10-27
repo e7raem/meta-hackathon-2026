@@ -115,9 +115,9 @@ test("released Ota's bare loopback Host is accepted only for GET /health", () =>
   }
 });
 
-function fixture(overrides = {}) {
+async function fixture(overrides = {}, { prepareBaseline = true } = {}) {
   const lines = [{ amount: 10000, discountEligible: true }];
-  const calls = { provider: 0, runner: 0, reservations: 0, exports: [], retained: [] };
+  const calls = { provider: 0, runner: 0, reservations: 0, baseline: 0, regressions: [], exports: [], retained: [] };
   const raw = { status: "completed", error: null, model: "muse-spark-1.3",
     usage: { input_tokens: 1, output_tokens: 1 }, output: [{ type: "message", content: [{ type: "output_text",
       text: JSON.stringify({ cases: [{ lines, expectedTotal: 9000, rationale: "Synthetic boundary case." }] }) }] }] };
@@ -125,6 +125,20 @@ function fixture(overrides = {}) {
     originalSource: "neutral original", candidateSource: "neutral proposed", rule: { text: "Independent fixture rule" },
     originalSha256: "a".repeat(64), candidateSha256: "b".repeat(64), diff: "neutral diff" }],
   scope, now: () => NOW, nonce: "fixture-nonce",
+  baselineCoverage: { label: "Synthetic public ordinary coverage", cases: [] },
+  baselineIdentity: "c".repeat(64),
+  verification: {
+    baseline: async () => { calls.baseline++; return { status: "PASS", cleanup: { ownedCopiesRemoved: true },
+      execution: { exitCode: 0, counts: { tests: 6, passed: 6, failed: 0, skipped: 0, cancelled: 0 }, stdout: "", stderr: "" } }; },
+    regression: async (input) => {
+      calls.regressions.push(input);
+      return { status: "RED_THEN_GREEN", sameTest: true, testSha256: input.testSha256,
+        red: { exitCode: 1, counts: { tests: 1, passed: 0, failed: 1, skipped: 0, cancelled: 0 }, stdout: "", stderr: "" },
+        green: { exitCode: 0, counts: { tests: 1, passed: 1, failed: 0, skipped: 0, cancelled: 0 }, stdout: "", stderr: "" },
+        correction: { kind: "PRE_REVIEWED_FIXED", label: "Synthetic reviewed correction", faultySha256: "a".repeat(64), correctedSha256: "b".repeat(64) },
+        cleanup: { ownedCopiesRemoved: true } };
+    },
+  },
   ledger: { ready: async () => ({ reservations: Array(calls.reservations) }),
     reserve: async () => ++calls.reservations },
   provider: async (packet) => {
@@ -137,6 +151,11 @@ function fixture(overrides = {}) {
   verifySources: async () => {}, retain: async (name, value) => calls.retained.push({ name, value }),
   persistExport: async (source) => { calls.exports.push(source); return { sha256: sha(source) }; },
   ...overrides });
+  if (prepareBaseline) {
+    // Explicit synthetic baseline setup; model/runner counts remain independent.
+    await controller.action("/api/baseline", { changeId: "a", requestId: "fixture-baseline" });
+    calls.retained.length = 0;
+  }
   return { controller, calls, raw };
 }
 
@@ -148,7 +167,7 @@ async function accepted(controller, expectedTotal = 9000) {
 }
 
 test("actual controller ordering uses frozen expectations before any runner invocation", async () => {
-  const { controller, calls } = fixture();
+  const { controller, calls } = await fixture();
   await assert.rejects(() => controller.action("/api/compare", { acceptedId: "unknown", requestId: "request-early" }), /ACCEPTED_CASES_REQUIRED/);
   const { result } = await accepted(controller);
   assert.equal(calls.runner, 0); assert.equal(result.acceptedCases[0].expectationOrigin, "META_ACCEPTED");
@@ -162,8 +181,36 @@ test("actual controller ordering uses frozen expectations before any runner invo
   assert.equal(calls.runner, 1);
 });
 
+test("a real passing baseline is required before any model reservation", async () => {
+  const f = await fixture({}, { prepareBaseline: false });
+  await assert.rejects(() => f.controller.action("/api/propose", { changeId: "a", requestId: "before-baseline" }), /PASSING_BASELINE_REQUIRED/);
+  assert.equal(f.calls.provider, 0); assert.equal(f.calls.reservations, 0);
+  const baseline = await f.controller.action("/api/baseline", { changeId: "a", requestId: "baseline-check" });
+  assert.equal(baseline.origin, "LOCAL_EXECUTION"); assert.equal(baseline.execution.counts.passed, 6);
+  assert.equal(f.calls.reservations, 0);
+  await f.controller.action("/api/propose", { changeId: "a", requestId: "after-baseline" });
+  assert.equal(f.calls.provider, 1);
+});
+
+test("same-test regression requires a reproduced export and never accepts caller paths or code", async () => {
+  const f = await fixture();
+  await assert.rejects(() => f.controller.action("/api/regression", { runId: "unknown", requestId: "early-regression" }), /REPRODUCED_EXPORT_REQUIRED/);
+  const { result } = await accepted(f.controller);
+  const run = await f.controller.action("/api/compare", { acceptedId: result.acceptedId, requestId: "request-compare" });
+  await assert.rejects(() => f.controller.action("/api/regression", { runId: run.runId, requestId: "no-export" }), /REPRODUCED_EXPORT_REQUIRED/);
+  const exported = await f.controller.action("/api/export", { runId: run.runId, requestId: "request-export" });
+  await assert.rejects(() => f.controller.action("/api/regression", { runId: run.runId, requestId: "path-injection", path: "elsewhere" }), /INVALID_FIELDS/);
+  const proof = await f.controller.action("/api/regression", { runId: run.runId, requestId: "request-regression" });
+  assert.equal(proof.status, "RED_THEN_GREEN"); assert.equal(proof.origin, "LOCAL_EXECUTION");
+  assert.equal(proof.testSha256, exported.sha256);
+  assert.equal(f.calls.regressions[0].testSource, exported.testSource);
+  assert.equal(f.calls.regressions[0].expectedTests, 1); assert.equal(f.calls.regressions[0].expectedFailures, 1);
+  assert.equal(f.calls.provider, 1, "red-green does not make a second model request");
+  await assert.rejects(() => f.controller.action("/api/regression", { runId: run.runId, requestId: "repeat-regression" }), /REGRESSION_ALREADY_RUN/);
+});
+
 test("source-derived rule check rejects unchecked or wrong expectations; corrections are REVIEWER not human identity", async () => {
-  const { controller, calls, raw } = fixture();
+  const { controller, calls, raw } = await fixture();
   raw.output[0].content[0].text = JSON.stringify({ cases: [{ lines: [{ amount: 10000, discountEligible: true }],
     expectedTotal: 8000, rationale: "Synthetic wrong proposed expectation" }] });
   const proposal = await controller.action("/api/propose", { changeId: "a", requestId: "request-propose" });
@@ -181,7 +228,7 @@ test("source-derived rule check rejects unchecked or wrong expectations; correct
 
 test("correct-change agreement and baseline/spec contradiction have narrow distinct outcomes", async () => {
   for (const [original, candidate, status] of [[9000, 9000, "NO_COUNTEREXAMPLE"], [8000, 8550, "INCONCLUSIVE"]]) {
-    const { controller } = fixture({ runner: async () => ({ rows: [{ original: { value: original, error: null },
+    const { controller } = await fixture({ runner: async () => ({ rows: [{ original: { value: original, error: null },
       candidate: { value: candidate, error: null } }] }) });
     const { result } = await accepted(controller);
     const run = await controller.action("/api/compare", { acceptedId: result.acceptedId, requestId: "request-compare" });
@@ -190,7 +237,7 @@ test("correct-change agreement and baseline/spec contradiction have narrow disti
 });
 
 test("runner failure is retained as inconclusive rows, never a reproduced regression", async () => {
-  const { controller } = fixture({ runner: async () => { throw new Error("synthetic runner error"); } });
+  const { controller } = await fixture({ runner: async () => { throw new Error("synthetic runner error"); } });
   const { result } = await accepted(controller);
   const run = await controller.action("/api/compare", { acceptedId: result.acceptedId, requestId: "request-compare" });
   assert.equal(run.status, "INCONCLUSIVE"); assert.equal(run.rows[0].original.value, null);
@@ -199,11 +246,11 @@ test("runner failure is retained as inconclusive rows, never a reproduced regres
 
 test("failed durable reservation never invokes provider; provider failure remains consumed", async () => {
   let provider = 0;
-  const failed = fixture({ ledger: { reserve: async () => { throw new Error("synthetic persistence failure"); } },
+  const failed = await fixture({ ledger: { reserve: async () => { throw new Error("synthetic persistence failure"); } },
     provider: async () => { provider++; } });
   await assert.rejects(() => failed.controller.action("/api/propose", { changeId: "a", requestId: "request-failed" }));
   assert.equal(provider, 0);
-  const stopped = fixture({ provider: async () => { throw new Error("synthetic transport failure"); } });
+  const stopped = await fixture({ provider: async () => { throw new Error("synthetic transport failure"); } });
   await assert.rejects(() => stopped.controller.action("/api/propose", { changeId: "a", requestId: "request-failed" }), /PROVIDER_FAILED_CONSUMED/);
   assert.equal(stopped.calls.reservations, 1);
   assert.equal(stopped.calls.retained[0].value.outcome, "FAILED_OR_UNKNOWN_CONSUMED");
@@ -211,14 +258,14 @@ test("failed durable reservation never invokes provider; provider failure remain
 
 test("malformed/empty/incomplete model data and arbitrary dispatch fields cannot become executable input", async () => {
   for (const kind of ["incomplete", "empty", "command"]) {
-    const f = fixture();
+    const f = await fixture();
     if (kind === "incomplete") f.raw.status = "incomplete";
     if (kind === "empty") f.raw.output[0].content[0].text = '{"cases":[]}';
     if (kind === "command") f.raw.output[0].content[0].text = '{"cases":[],"command":"bad"}';
     await assert.rejects(() => f.controller.action("/api/propose", { changeId: "a", requestId: "request-invalid" }));
     assert.equal(f.calls.runner, 0);
   }
-  const f = fixture();
+  const f = await fixture();
   await assert.rejects(() => f.controller.action("/api/propose", { changeId: "../../private", requestId: "request-path" }));
   await assert.rejects(() => f.controller.action("/api/propose", { changeId: "a", requestId: "request-extra", command: "bad" }));
   await assert.rejects(() => f.controller.action("/api/propose", { changeId: "a", requestId: 12345678 }));
@@ -226,7 +273,7 @@ test("malformed/empty/incomplete model data and arbitrary dispatch fields cannot
 });
 
 test("valid empty model cases are inconclusive, not malformed or a meaningful comparison", async () => {
-  const f = fixture();
+  const f = await fixture();
   f.raw.output[0].content[0].text = '{"cases":[]}';
   await assert.rejects(() => f.controller.action("/api/propose", {
     changeId: "a", requestId: "request-no-cases",
@@ -243,8 +290,10 @@ test("valid empty model cases are inconclusive, not malformed or a meaningful co
 
 test("concurrent action is refused, not another model call or hidden retry", async () => {
   let release;
+  let blocked = false;
   const wait = new Promise((done) => { release = done; });
-  const f = fixture({ verifySources: () => wait });
+  const f = await fixture({ verifySources: () => blocked ? wait : Promise.resolve() });
+  blocked = true;
   const first = f.controller.action("/api/propose", { changeId: "a", requestId: "request-first" });
   await assert.rejects(() => f.controller.action("/api/propose", { changeId: "a", requestId: "request-second" }), /BUSY/);
   release(); await first; assert.equal(f.calls.provider, 1);
@@ -277,7 +326,7 @@ test("export atomically persists exact runnable bytes, preserves private mode, r
 });
 
 test("export persistence failure returns no successful command or missing-artifact claim", async () => {
-  const f = fixture({ persistExport: async () => { throw new Error("synthetic disk failure"); } });
+  const f = await fixture({ persistExport: async () => { throw new Error("synthetic disk failure"); } });
   const { result } = await accepted(f.controller);
   const run = await f.controller.action("/api/compare", { acceptedId: result.acceptedId, requestId: "request-compare" });
   await assert.rejects(() => f.controller.action("/api/export", { runId: run.runId, requestId: "request-export" }), /synthetic disk/);
@@ -295,7 +344,7 @@ test("shutdown drains blocked source verification without dispatching provider o
     let blocked = false, entered, release;
     const waiting = new Promise((done) => { entered = done; });
     const gate = new Promise((done) => { release = done; });
-    const f = fixture({ lifecycle, verifySources: async () => {
+    const f = await fixture({ lifecycle, verifySources: async () => {
       if (blocked) { entered(); await gate; }
     } });
     const acceptedId = operation === "compare" ? (await accepted(f.controller)).result.acceptedId : null;
@@ -343,7 +392,7 @@ test("response error, aborted and premature close settle once and retain consume
     };
     req.end = (body) => { requestBody = JSON.parse(body); };
     res.statusCode = 200; res.complete = false;
-    const f = fixture({ provider: (packet) => museProposal("unused-fixture-path", packet, scope.deadline, {
+    const f = await fixture({ provider: (packet) => museProposal("unused-fixture-path", packet, scope.deadline, {
       now: () => NOW,
       readCredential: async () => Buffer.from("synthetic-test-credential-never-real"),
       request: (_url, _options, response) => {
@@ -390,7 +439,7 @@ test("provider shutdown waits for delayed close before cleanup can complete", as
 });
 
 test("a proposal accepts only once; comparison cannot be followed by re-authored expectations", async () => {
-  const f = fixture();
+  const f = await fixture();
   const { proposal, result } = await accepted(f.controller);
   const run = await f.controller.action("/api/compare", { acceptedId: result.acceptedId,
     requestId: "request-compare" });

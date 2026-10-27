@@ -1,5 +1,11 @@
 /*
- * Pricing change reviewer — browser module (web/app.js).
+ * Break This PR — browser module (web/app.js).
+ *
+ * A developer reviews ONE prepared sample checkout PR in three stages:
+ * the code change (with an actually executed baseline), the breaking
+ * basket (Muse-proposed cases reviewed against the written rule before
+ * any comparison), and the test to keep (persisted export proven
+ * red -> green against a pre-reviewed fixed correction).
  *
  * Pure state, validation, and API-client functions are exported for Node
  * tests. DOM wiring happens only when a document is present, so importing
@@ -9,10 +15,12 @@
 
 export const API_PATHS = Object.freeze({
   session: "/api/session",
+  baseline: "/api/baseline",
   propose: "/api/propose",
   accept: "/api/accept",
   compare: "/api/compare",
   export: "/api/export",
+  regression: "/api/regression",
 });
 
 export const EXPECTED_TOTAL_MIN = 0;
@@ -20,13 +28,19 @@ export const EXPECTED_TOTAL_MAX = 400000;
 
 const MODES = ["LIVE", "FIXTURE"];
 const ORIGINS = ["LIVE", "FIXTURE"];
+const LOCAL_EXECUTION = "LOCAL_EXECUTION";
 const COMPARISON_STATUSES = ["REPRODUCED", "NO_COUNTEREXAMPLE", "INCONCLUSIVE"];
+const BASELINE_STATUSES = ["PASS", "FAIL", "INCONCLUSIVE"];
+const REGRESSION_STATUSES = ["RED_THEN_GREEN", "INCONCLUSIVE"];
 const EXPECTATION_ORIGINS = ["META_ACCEPTED", "REVIEWER_CORRECTED"];
 const EXPORT_FILENAME = "regression.test.mjs";
 const EXPORT_PATH = "evidence/regression.test.mjs";
 const EXPORT_COMMAND = "ota run verify:export --agent";
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
-const DIGITS_PATTERN = /^\d{1,6}$/;
+const POUNDS_PATTERN = /^\d{1,4}(\.\d{1,2})?$/;
+
+export const NO_CASES_MESSAGE =
+  "INCONCLUSIVE: Muse proposed no cases; no new case comparison was run. This is not approval.";
 
 function isPlainObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -40,6 +54,15 @@ function textOk(value, maxLength) {
   return typeof value === "string" && value.length > 0 && value.length <= maxLength;
 }
 
+// Like textOk but accepts the empty string (captured stdout/stderr may be empty).
+function textAny(value, maxLength) {
+  return typeof value === "string" && value.length <= maxLength;
+}
+
+function intOrNull(value, min, max) {
+  return value === null || isIntegerIn(value, min, max);
+}
+
 function fail(error) {
   return { ok: false, error };
 }
@@ -50,12 +73,40 @@ export function isValidExpectedTotal(value) {
   return isIntegerIn(value, EXPECTED_TOTAL_MIN, EXPECTED_TOTAL_MAX);
 }
 
-export function parseExpectationInput(raw) {
+/*
+ * Money: the backend speaks integer pence (10000 = GBP 100). The UI
+ * renders pounds with two decimals and parses reviewer input strictly:
+ * digits with at most two decimals, optional leading £, no coercion.
+ */
+export function formatPence(pence) {
+  if (!Number.isSafeInteger(pence) || pence < 0) return "unknown";
+  const pounds = Math.trunc(pence / 100);
+  const pennies = String(pence % 100).padStart(2, "0");
+  return `£${pounds}.${pennies}`;
+}
+
+export function describeChargeDifference(candidate, expected) {
+  if (!isValidExpectedTotal(candidate) || !isValidExpectedTotal(expected)) return "Charge comparison unavailable.";
+  const difference = candidate - expected;
+  if (difference > 0) return `Customer overcharged ${formatPence(difference)}`;
+  if (difference < 0) return `Shop undercharges ${formatPence(-difference)}`;
+  return "Matches the reviewed total.";
+}
+
+export function penceToPoundsString(pence) {
+  if (!Number.isSafeInteger(pence) || pence < 0) return "";
+  return `${Math.trunc(pence / 100)}.${String(pence % 100).padStart(2, "0")}`;
+}
+
+export function parsePoundsInput(raw) {
   if (typeof raw !== "string") return null;
-  const trimmed = raw.trim();
-  if (!DIGITS_PATTERN.test(trimmed)) return null;
-  const value = Number.parseInt(trimmed, 10);
-  return isValidExpectedTotal(value) ? value : null;
+  let trimmed = raw.trim();
+  if (trimmed.startsWith("£")) trimmed = trimmed.slice(1).trim();
+  if (!POUNDS_PATTERN.test(trimmed)) return null;
+  const [poundsPart, decimalPart = ""] = trimmed.split(".");
+  const pence = Number.parseInt(poundsPart, 10) * 100
+    + Number.parseInt(decimalPart.padEnd(2, "0") || "0", 10);
+  return isValidExpectedTotal(pence) ? pence : null;
 }
 
 function validateLines(lines) {
@@ -88,6 +139,53 @@ function validateCase(entry) {
   return OK;
 }
 
+function validateCounts(counts) {
+  if (!isPlainObject(counts)) return fail("execution counts must be an object");
+  for (const key of ["tests", "passed", "failed", "skipped", "cancelled"]) {
+    if (!isIntegerIn(counts[key], 0, 1000)) {
+      return fail(`execution counts.${key} must be an integer 0..1000`);
+    }
+  }
+  return OK;
+}
+
+function validateExecutionRecord(record, label) {
+  if (!isPlainObject(record)) return fail(`${label} execution record must be an object`);
+  if (!intOrNull(record.exitCode, -1000, 1000)) {
+    return fail(`${label} exitCode must be an integer or null`);
+  }
+  if (record.counts !== null) {
+    const counts = validateCounts(record.counts);
+    if (!counts.ok) return fail(`${label}: ${counts.error}`);
+  }
+  if (!textAny(record.stdout, 16384) || !textAny(record.stderr, 16384)) {
+    return fail(`${label} stdout/stderr must be bounded strings`);
+  }
+  return OK;
+}
+
+function validateCoverage(coverage) {
+  if (!isPlainObject(coverage)) return fail("baseline coverage must be an object");
+  if (!textOk(coverage.label, 300)) return fail("coverage label must be a bounded non-empty string");
+  if (!Array.isArray(coverage.cases) || coverage.cases.length < 1 || coverage.cases.length > 10) {
+    return fail("coverage must list between 1 and 10 cases");
+  }
+  const seen = new Set();
+  for (const entry of coverage.cases) {
+    if (!isPlainObject(entry)) return fail("coverage cases must be objects");
+    if (!textOk(entry.id, 100)) return fail("coverage case id must be a non-empty string");
+    if (seen.has(entry.id)) return fail("coverage case ids must be unique");
+    seen.add(entry.id);
+    if (!textOk(entry.title, 300)) return fail("coverage case title must be a bounded non-empty string");
+    const lines = validateLines(entry.lines);
+    if (!lines.ok) return lines;
+    if (!isValidExpectedTotal(entry.expectedTotal)) {
+      return fail("coverage expectedTotal must be an integer within bounds");
+    }
+  }
+  return OK;
+}
+
 export function validateSession(data) {
   if (!isPlainObject(data)) return fail("session payload must be an object");
   if (!MODES.includes(data.mode)) return fail("session mode must be literal LIVE or FIXTURE");
@@ -95,30 +193,26 @@ export function validateSession(data) {
   if (!isIntegerIn(data.callsUsed, 0, 1000000)) return fail("session callsUsed must be a non-negative integer");
   if (!isIntegerIn(data.limit, 1, 1000000)) return fail("session limit must be a positive integer");
   if (!textOk(data.deadline, 100)) return fail("session deadline must be a non-empty string");
-  if (!Array.isArray(data.changes) || data.changes.length < 1 || data.changes.length > 10) {
-    return fail("session changes must list between 1 and 10 prepared changes");
+  if (!Array.isArray(data.changes) || data.changes.length !== 1) {
+    return fail("session must contain exactly the one prepared change");
   }
-  const seen = new Set();
-  for (const change of data.changes) {
-    if (!isPlainObject(change)) return fail("changes must be objects");
-    if (change.id !== "a" && change.id !== "b") return fail('change ids must be "a" or "b"');
-    if (seen.has(change.id)) return fail("change ids must be unique");
-    seen.add(change.id);
-    if (!textOk(change.title, 300)) return fail("change title must be a bounded non-empty string");
-    if (!isPlainObject(change.rule)) return fail("change rule must be an object");
-    if (!textOk(change.rule.id, 100)) return fail("rule id must be a non-empty string");
-    if (!textOk(change.rule.title, 300)) return fail("rule title must be a bounded non-empty string");
-    if (!textOk(change.rule.text, 8000)) return fail("rule text must be a bounded non-empty string");
-    if (!textOk(change.rule.domain, 2000)) return fail("rule domain must be a bounded non-empty string");
-    if (!textOk(change.diff, 16000)) return fail("change diff must be a bounded non-empty string");
-    if (typeof change.originalSha256 !== "string" || !SHA256_PATTERN.test(change.originalSha256)) {
-      return fail("originalSha256 must be 64 lowercase hex characters");
-    }
-    if (typeof change.candidateSha256 !== "string" || !SHA256_PATTERN.test(change.candidateSha256)) {
-      return fail("candidateSha256 must be 64 lowercase hex characters");
-    }
+  const change = data.changes[0];
+  if (!isPlainObject(change)) return fail("the prepared change must be an object");
+  if (change.id !== "a") return fail('the prepared change id must be "a"');
+  if (!textOk(change.title, 300)) return fail("change title must be a bounded non-empty string");
+  if (!isPlainObject(change.rule)) return fail("change rule must be an object");
+  if (!textOk(change.rule.id, 100)) return fail("rule id must be a non-empty string");
+  if (!textOk(change.rule.title, 300)) return fail("rule title must be a bounded non-empty string");
+  if (!textOk(change.rule.text, 8000)) return fail("rule text must be a bounded non-empty string");
+  if (!textOk(change.rule.domain, 2000)) return fail("rule domain must be a bounded non-empty string");
+  if (!textOk(change.diff, 16000)) return fail("change diff must be a bounded non-empty string");
+  if (typeof change.originalSha256 !== "string" || !SHA256_PATTERN.test(change.originalSha256)) {
+    return fail("originalSha256 must be 64 lowercase hex characters");
   }
-  return OK;
+  if (typeof change.candidateSha256 !== "string" || !SHA256_PATTERN.test(change.candidateSha256)) {
+    return fail("candidateSha256 must be 64 lowercase hex characters");
+  }
+  return validateCoverage(data.baselineCoverage);
 }
 
 export function validateProposal(data) {
@@ -263,6 +357,89 @@ export function validateExport(data) {
   return OK;
 }
 
+export function validateBaseline(data) {
+  if (!isPlainObject(data)) return fail("baseline payload must be an object");
+  if (data.kind !== "baseline") return fail('baseline kind must be "baseline"');
+  if (data.origin !== LOCAL_EXECUTION) return fail("baseline origin must be LOCAL_EXECUTION");
+  if (data.changeId !== "a") return fail('baseline changeId must be "a"');
+  if (!BASELINE_STATUSES.includes(data.status)) {
+    return fail("baseline status must be PASS, FAIL or INCONCLUSIVE");
+  }
+  const coverage = validateCoverage(data.coverage);
+  if (!coverage.ok) return coverage;
+  const execution = validateExecutionRecord(data.execution, "baseline");
+  if (!execution.ok) return execution;
+  if (!isPlainObject(data.sourceIdentities)) return fail("baseline sourceIdentities must be an object");
+  for (const key of ["original", "candidate", "baseline"]) {
+    if (!textOk(data.sourceIdentities[key], 300)) {
+      return fail(`baseline sourceIdentities.${key} must be a bounded non-empty string`);
+    }
+  }
+  if (!Array.isArray(data.limits) || data.limits.length > 20) {
+    return fail("baseline limits must be a bounded array");
+  }
+  for (const limit of data.limits) {
+    if (!textOk(limit, 500)) return fail("baseline limits must be bounded non-empty strings");
+  }
+  if (data.status === "PASS") {
+    const counts = data.execution.counts;
+    const consistent = data.execution.exitCode === 0
+      && counts !== null
+      && counts.tests === 6 && counts.passed === 6 && counts.failed === 0
+      && counts.skipped === 0 && counts.cancelled === 0;
+    if (!consistent) {
+      return fail("baseline PASS is inconsistent with its execution record (needs exit 0 and 6 of 6 passed)");
+    }
+  }
+  return OK;
+}
+
+export function validateRegression(data) {
+  if (!isPlainObject(data)) return fail("regression payload must be an object");
+  if (data.kind !== "regression") return fail('regression kind must be "regression"');
+  if (data.origin !== LOCAL_EXECUTION) return fail("regression origin must be LOCAL_EXECUTION");
+  if (!textOk(data.runId, 200)) return fail("regression runId must be a non-empty string");
+  if (!REGRESSION_STATUSES.includes(data.status)) {
+    return fail("regression status must be RED_THEN_GREEN or INCONCLUSIVE");
+  }
+  if (typeof data.testSha256 !== "string" || !SHA256_PATTERN.test(data.testSha256)) {
+    return fail("regression testSha256 must be 64 lowercase hex characters");
+  }
+  if (typeof data.sameTest !== "boolean") return fail("regression sameTest must be an explicit boolean");
+  const red = validateExecutionRecord(data.red, "red run");
+  if (!red.ok) return red;
+  if (data.green !== null) {
+    const green = validateExecutionRecord(data.green, "green run");
+    if (!green.ok) return green;
+  }
+  if (!isPlainObject(data.correction)) return fail("regression correction must be an object");
+  if (data.correction.kind !== "PRE_REVIEWED_FIXED") {
+    return fail("regression correction kind must be PRE_REVIEWED_FIXED");
+  }
+  if (!textOk(data.correction.label, 300)) {
+    return fail("regression correction label must be a bounded non-empty string");
+  }
+  for (const key of ["faultySha256", "correctedSha256"]) {
+    const value = data.correction[key];
+    if (typeof value !== "string" || !SHA256_PATTERN.test(value)) {
+      return fail(`regression correction.${key} must be 64 lowercase hex characters`);
+    }
+  }
+  if (!isPlainObject(data.cleanup) || typeof data.cleanup.ownedCopiesRemoved !== "boolean") {
+    return fail("regression cleanup.ownedCopiesRemoved must be an explicit boolean");
+  }
+  if (!Array.isArray(data.limits) || data.limits.length > 20) {
+    return fail("regression limits must be a bounded array");
+  }
+  for (const limit of data.limits) {
+    if (!textOk(limit, 500)) return fail("regression limits must be bounded non-empty strings");
+  }
+  if (data.status === "RED_THEN_GREEN" && (data.sameTest !== true || data.green === null)) {
+    return fail("RED_THEN_GREEN requires sameTest true and a green run record");
+  }
+  return OK;
+}
+
 function apiError(code, message) {
   const error = new Error(`${code}: ${message}`);
   error.code = code;
@@ -271,7 +448,7 @@ function apiError(code, message) {
 
 function describeError(error) {
   if (error?.code === "NO_CASES_PROPOSED") {
-    return "NO_CASES_PROPOSED: INCONCLUSIVE. Muse proposed no cases; no implementations were run. This is not approval.";
+    return NO_CASES_MESSAGE;
   }
   const text = error instanceof Error ? error.message : String(error);
   return text.length > 500 ? `${text.slice(0, 500)}…` : text;
@@ -332,6 +509,14 @@ export function createApiClient({ fetchImpl, randomId }) {
       const data = await requestJson(API_PATHS.session, { method: "GET" });
       return ensure(validateSession(data), data);
     },
+    async baseline({ csrfToken }) {
+      const data = await requestJson(API_PATHS.baseline, {
+        method: "POST",
+        csrfToken,
+        body: { changeId: "a" },
+      });
+      return ensure(validateBaseline(data), data);
+    },
     async propose({ csrfToken, changeId }) {
       const data = await requestJson(API_PATHS.propose, {
         method: "POST",
@@ -372,11 +557,26 @@ export function createApiClient({ fetchImpl, randomId }) {
       });
       return ensure(validateExport(data), data);
     },
+    async regression({ csrfToken, runId }) {
+      const data = await requestJson(API_PATHS.regression, {
+        method: "POST",
+        csrfToken,
+        body: { runId },
+      });
+      ensure(validateRegression(data), data);
+      if (data.runId !== runId) {
+        throw apiError("invalid_shape", "regression echoed a different runId");
+      }
+      return data;
+    },
   };
 }
 
 function blankErrors() {
-  return { session: null, propose: null, accept: null, compare: null, export: null };
+  return {
+    session: null, baseline: null, propose: null, accept: null,
+    compare: null, export: null, regression: null,
+  };
 }
 
 export function initialState() {
@@ -384,13 +584,14 @@ export function initialState() {
     session: null,
     budgetKnown: false,
     proposalPending: false,
-    selectedChangeId: null,
+    baseline: null,
     proposal: null,
     expectations: {},
     reviewedConfirmed: false,
     accepted: null,
     comparison: null,
     exportResult: null,
+    regression: null,
     inFlight: null,
     epoch: 0,
     errors: blankErrors(),
@@ -409,16 +610,6 @@ export function createStore({ client }) {
 
   function notify() {
     for (const listener of listeners) listener(state);
-  }
-
-  function resetDownstreamOfSelection() {
-    state.proposal = null;
-    state.expectations = {};
-    state.reviewedConfirmed = false;
-    state.accepted = null;
-    state.comparison = null;
-    state.exportResult = null;
-    state.errors = blankErrors();
   }
 
   function resetDownstreamOfExpectations() {
@@ -466,6 +657,44 @@ export function createStore({ client }) {
       if (!acceptedCase || acceptedCase.expectedTotal !== row.expectedTotal) {
         return "comparison rows do not match the accepted expectations";
       }
+    }
+    return null;
+  }
+
+  /*
+   * Client-side cross-check of a claimed RED_THEN_GREEN result against the
+   * context this session already holds: the exported test identity and the
+   * accepted case count. The backend's claim is rejected, not repaired,
+   * when the evidence does not support it.
+   */
+  function checkRegressionEvidence(regression) {
+    if (regression.sameTest !== true) return "sameTest is not true";
+    if (regression.testSha256 !== state.exportResult.sha256) {
+      return "the executed test hash differs from the exported test";
+    }
+    const expectedTests = state.accepted.acceptedCases.length;
+    const red = regression.red;
+    if (red.exitCode !== 1 || red.counts === null) return "red run did not fail with exit code 1";
+    if (red.counts.tests !== expectedTests) return "red run test count differs from the accepted cases";
+    if (red.counts.failed < 1) return "red run reported no failing assertion";
+    if (red.counts.passed + red.counts.failed !== red.counts.tests) {
+      return "red run counts do not add up";
+    }
+    if (red.counts.skipped !== 0 || red.counts.cancelled !== 0) {
+      return "red run skipped or cancelled tests";
+    }
+    const green = regression.green;
+    if (green === null) return "no green run record";
+    if (green.exitCode !== 0 || green.counts === null) return "green run did not exit 0";
+    if (green.counts.tests !== expectedTests) return "green run test count differs from the accepted cases";
+    if (green.counts.failed !== 0 || green.counts.passed !== green.counts.tests) {
+      return "green run did not pass every test";
+    }
+    if (green.counts.skipped !== 0 || green.counts.cancelled !== 0) {
+      return "green run skipped or cancelled tests";
+    }
+    if (regression.cleanup.ownedCopiesRemoved !== true) {
+      return "backend did not confirm cleanup of its owned copies";
     }
     return null;
   }
@@ -535,21 +764,38 @@ export function createStore({ client }) {
       }
     },
 
-    selectChange(changeId) {
+    async runBaseline() {
       if (!state.session) return { ok: false, reason: "no_session" };
-      const known = state.session.changes.some((change) => change.id === changeId);
-      if (!known) return { ok: false, reason: "unknown_change" };
-      if (state.selectedChangeId === changeId) return { ok: true };
-      state.selectedChangeId = changeId;
-      state.epoch += 1;
-      state.inFlight = null;
-      resetDownstreamOfSelection();
+      if (state.proposal) return { ok: false, reason: "already_proposed" };
+      const busy = guardBusy();
+      if (busy) return busy;
+      const epoch = state.epoch;
+      state.inFlight = "baseline";
+      state.errors.baseline = null;
       notify();
-      return { ok: true };
+      try {
+        const baseline = await client.baseline({ csrfToken: state.session.csrfToken });
+        if (state.epoch !== epoch) return { ok: false, reason: "stale" };
+        state.inFlight = null;
+        state.baseline = baseline;
+        notify();
+        return { ok: true };
+      } catch (error) {
+        if (state.epoch !== epoch) return { ok: false, reason: "stale" };
+        state.inFlight = null;
+        state.baseline = null;
+        state.errors.baseline = describeError(error);
+        notify();
+        return { ok: false, reason: "request_failed" };
+      }
     },
 
     async propose() {
-      if (!state.session || !state.selectedChangeId) return { ok: false, reason: "not_ready" };
+      if (!state.session) return { ok: false, reason: "not_ready" };
+      if (!state.baseline || state.baseline.status !== "PASS") {
+        return { ok: false, reason: "baseline_required" };
+      }
+      if (state.proposal) return { ok: false, reason: "already_proposed" };
       const busy = guardBusy();
       if (busy) return busy;
       if (!state.budgetKnown) return { ok: false, reason: "usage_unknown" };
@@ -563,7 +809,7 @@ export function createStore({ client }) {
       try {
         const proposal = await client.propose({
           csrfToken: state.session.csrfToken,
-          changeId: state.selectedChangeId,
+          changeId: "a",
         });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
         if (proposal.callsUsed <= state.session.callsUsed || proposal.callsUsed > state.session.limit) {
@@ -577,7 +823,7 @@ export function createStore({ client }) {
         for (const entry of proposal.cases) {
           state.expectations[entry.id] = {
             proposed: entry.expectedTotal,
-            raw: String(entry.expectedTotal),
+            raw: penceToPoundsString(entry.expectedTotal),
             value: entry.expectedTotal,
             edited: false,
           };
@@ -601,14 +847,14 @@ export function createStore({ client }) {
 
     setExpectation(caseId, raw) {
       if (!state.proposal) return { ok: false, reason: "no_proposal" };
-      if (state.accepted) return { ok: false, reason: "expectations_locked" };
+      if (state.accepted) return { ok: false, reason: "frozen" };
       const busy = guardBusy();
       if (busy) return busy;
       const entry = state.expectations[caseId];
       if (!entry) return { ok: false, reason: "unknown_case" };
-      if (typeof raw !== "string" || raw.length > 40) return { ok: false, reason: "invalid_input" };
+      if (typeof raw !== "string" || raw.length > 12) return { ok: false, reason: "invalid_input" };
       entry.raw = raw;
-      entry.value = parseExpectationInput(raw);
+      entry.value = parsePoundsInput(raw);
       entry.edited = entry.value !== null && entry.value !== entry.proposed;
       resetDownstreamOfExpectations();
       notify();
@@ -617,7 +863,7 @@ export function createStore({ client }) {
 
     confirmReview(confirmed) {
       if (!state.proposal) return { ok: false, reason: "no_proposal" };
-      if (state.accepted) return { ok: false, reason: "expectations_locked" };
+      if (state.accepted) return { ok: false, reason: "frozen" };
       const busy = guardBusy();
       if (busy) return busy;
       state.reviewedConfirmed = confirmed === true;
@@ -708,6 +954,7 @@ export function createStore({ client }) {
 
     async exportTest() {
       if (!state.comparison) return { ok: false, reason: "no_comparison" };
+      if (state.comparison.status !== "REPRODUCED") return { ok: false, reason: "not_reproduced" };
       const busy = guardBusy();
       if (busy) return busy;
       if (state.exportResult) return { ok: false, reason: "already_exported" };
@@ -730,6 +977,46 @@ export function createStore({ client }) {
         state.inFlight = null;
         state.exportResult = null;
         state.errors.export = describeError(error);
+        notify();
+        return { ok: false, reason: "request_failed" };
+      }
+    },
+
+    async runRegression() {
+      if (!state.exportResult) return { ok: false, reason: "not_exported" };
+      const busy = guardBusy();
+      if (busy) return busy;
+      if (state.regression) return { ok: false, reason: "already_run" };
+      const epoch = state.epoch;
+      state.inFlight = "regression";
+      state.errors.regression = null;
+      notify();
+      try {
+        const regression = await client.regression({
+          csrfToken: state.session.csrfToken,
+          runId: state.comparison.runId,
+        });
+        if (state.epoch !== epoch) return { ok: false, reason: "stale" };
+        state.inFlight = null;
+        if (regression.status === "RED_THEN_GREEN") {
+          const problem = checkRegressionEvidence(regression);
+          if (problem) {
+            state.regression = null;
+            state.errors.regression =
+              `The backend claimed RED_THEN_GREEN but its evidence does not prove it: ${problem}. ` +
+              "Treat this run as not proven.";
+            notify();
+            return { ok: false, reason: "request_failed" };
+          }
+        }
+        state.regression = regression;
+        notify();
+        return { ok: true };
+      } catch (error) {
+        if (state.epoch !== epoch) return { ok: false, reason: "stale" };
+        state.inFlight = null;
+        state.regression = null;
+        state.errors.regression = describeError(error);
         notify();
         return { ok: false, reason: "request_failed" };
       }
@@ -768,13 +1055,9 @@ function setStatus(node, text, tone) {
   node.className = tone ? `status ${tone}` : "status";
 }
 
-function formatMinorUnits(value) {
-  return `${value} minor units`;
-}
-
 function describeLines(lines) {
   return lines
-    .map((line) => `${line.amount} ${line.discountEligible ? "eligible" : "not eligible"}`)
+    .map((line) => `${formatPence(line.amount)} ${line.discountEligible ? "eligible" : "not eligible"}`)
     .join(" + ");
 }
 
@@ -790,8 +1073,11 @@ function startBrowserApp() {
     modeBadge: byId("mode-badge"),
     sessionMeta: byId("session-meta"),
     sessionError: byId("session-error"),
-    changeOptions: byId("change-options"),
-    changeDetail: byId("change-detail"),
+    prTitle: byId("pr-title"),
+    changePanel: byId("change-panel"),
+    baselineButton: byId("baseline-button"),
+    baselineStatus: byId("baseline-status"),
+    baselinePanel: byId("baseline-panel"),
     proposeButton: byId("propose-button"),
     proposeStatus: byId("propose-status"),
     proposalPanel: byId("proposal-panel"),
@@ -806,9 +1092,12 @@ function startBrowserApp() {
     exportButton: byId("export-button"),
     exportStatus: byId("export-status"),
     exportPanel: byId("export-panel"),
+    regressionButton: byId("regression-button"),
+    regressionStatus: byId("regression-status"),
+    regressionPanel: byId("regression-panel"),
   };
 
-  let renderedChangesKey = null;
+  let renderedSessionToken = null;
   let renderedProposalId = null;
 
   function renderSession(state) {
@@ -833,83 +1122,138 @@ function startBrowserApp() {
     nodes.modeBadge.className = mode === "LIVE" ? "badge live" : "badge fixture";
     nodes.sessionMeta.textContent =
       state.budgetKnown
-        ? `${callsUsed} of ${limit} model calls used (last confirmed) · session deadline ${deadline}`
-        : `Model usage unknown or pending; refresh before another call · session deadline ${deadline}`;
+        ? `${callsUsed} of ${limit} model requests used (last confirmed)`
+        : "Model usage unknown or pending; refresh before another request";
+    nodes.sessionMeta.title = `Session deadline ${deadline}`;
     nodes.sessionError.hidden = true;
   }
 
-  function renderChanges(state) {
-    const session = state.session;
-    const key = session
-      ? session.changes.map((change) => change.id).join(",")
-      : null;
-    if (key !== renderedChangesKey) {
-      renderedChangesKey = key;
-      clear(nodes.changeOptions);
-      if (session) {
-        for (const change of session.changes) {
-          const input = el("input", {
-            type: "radio",
-            name: "change",
-            id: `change-${change.id}`,
-            value: change.id,
-          });
-          input.addEventListener("change", () => {
-            store.selectChange(change.id);
-          });
-          nodes.changeOptions.append(
-            el("div", { class: "change-option" },
-              input,
-              el("label", { for: `change-${change.id}` }, `Change ${change.id.toUpperCase()}: ${change.title}`),
-            ),
-          );
-        }
-      }
+  function describeCounts(counts) {
+    if (counts === null) return "no test counts reported";
+    return `${counts.tests} tests · ${counts.passed} passed · ${counts.failed} failed`
+      + ` · ${counts.skipped} skipped · ${counts.cancelled} cancelled`;
+  }
+
+  function executionEvidence(label, record) {
+    return el("details", {},
+      el("summary", {}, `${label}: raw execution log`),
+      el("p", { class: "mono fineprint" },
+        `exit ${record.exitCode === null ? "unknown" : record.exitCode} · ${describeCounts(record.counts)}`),
+      el("pre", { class: "log" }, record.stdout || "(empty stdout)"),
+      el("pre", { class: "log" }, record.stderr || "(empty stderr)"),
+    );
+  }
+
+  function renderChange(state) {
+    const token = state.session ? state.session.csrfToken : null;
+    if (token === renderedSessionToken) return;
+    renderedSessionToken = token;
+    clear(nodes.changePanel);
+    nodes.prTitle.textContent = state.session ? state.session.changes[0].title : "";
+    if (!state.session) return;
+    const change = state.session.changes[0];
+    const coverage = state.session.baselineCoverage;
+    const coverageList = el("ul", { class: "coverage-list" });
+    for (const entry of coverage.cases) {
+      coverageList.append(
+        el("li", {},
+          el("span", {}, `${entry.title}: `),
+          el("span", { class: "mono" }, describeLines(entry.lines)),
+          el("span", {}, ` → expected ${formatPence(entry.expectedTotal)}`),
+        ),
+      );
     }
-    for (const radio of nodes.changeOptions.querySelectorAll("input[type=radio]")) {
-      radio.checked = radio.value === state.selectedChangeId;
-      radio.disabled = Boolean(state.inFlight);
-    }
-    clear(nodes.changeDetail);
-    if (!session || !state.selectedChangeId) return;
-    const change = session.changes.find((entry) => entry.id === state.selectedChangeId);
-    if (!change) return;
-    nodes.changeDetail.append(
-      el("h3", {}, change.title),
-      el("details", { open: true },
-        el("summary", {}, `Rule: ${change.rule.title}`),
+    nodes.changePanel.append(
+      el("details", {},
+        el("summary", {}, "Full rule and input units"),
         el("p", { class: "rule-text" }, change.rule.text),
+        el("p", {}, "Raw code and tests use pence: 10000 = £100."),
         el("p", { class: "rule-domain" }, `Input domain: ${change.rule.domain}`),
       ),
       el("details", {},
-        el("summary", {}, "Proposed source change (diff)"),
+        el("summary", {}, "The proposed change (read-only diff)"),
         el("pre", { class: "diff" }, change.diff),
       ),
       el("details", {},
-        el("summary", {}, "Source identities"),
+        el("summary", {}, "Baseline coverage: three baskets × two versions"),
+        coverageList,
+        el("p", { class: "fineprint" },
+          "Three ordinary baskets × two versions: six checks. No voucher-boundary coverage; these are not failing witnesses."),
+      ),
+      el("details", {},
+        el("summary", {}, "Evidence: source identities"),
         el("dl", { class: "identities" },
           el("dt", {}, "original sha256"),
-          el("dd", {}, change.originalSha256),
+          el("dd", { class: "mono" }, change.originalSha256),
           el("dt", {}, "candidate sha256"),
-          el("dd", {}, change.candidateSha256),
+          el("dd", { class: "mono" }, change.candidateSha256),
+          el("dt", {}, "session deadline"),
+          el("dd", { class: "mono" }, state.session.deadline),
         ),
       ),
     );
   }
 
+  function renderBaseline(state) {
+    nodes.baselineButton.disabled =
+      !state.session || Boolean(state.inFlight) || Boolean(state.proposal)
+      || (state.baseline !== null && state.baseline.status === "PASS");
+    if (state.inFlight === "baseline") {
+      setStatus(nodes.baselineStatus, "Running the six baseline assertions against both versions…", "pending");
+    } else if (state.errors.baseline) {
+      setStatus(nodes.baselineStatus, `Baseline run failed: ${state.errors.baseline}`, "error");
+    } else if (state.baseline) {
+      const counts = state.baseline.execution.counts;
+      if (state.baseline.status === "PASS") {
+        setStatus(nodes.baselineStatus,
+          `Baseline PASS — exit ${state.baseline.execution.exitCode}, `
+          + `${counts.passed} of ${counts.tests} assertions passed on original and candidate.`, "good");
+      } else if (state.baseline.status === "FAIL") {
+        setStatus(nodes.baselineStatus,
+          "Baseline FAIL — the existing assertions already disagree. Fix that before asking Muse.", "bad");
+      } else {
+        setStatus(nodes.baselineStatus,
+          "Baseline INCONCLUSIVE — the run did not produce a usable verdict. This is not a pass.", "warn");
+      }
+    } else {
+      setStatus(nodes.baselineStatus, "Not run yet. Nothing here is assumed green.", null);
+    }
+    clear(nodes.baselinePanel);
+    if (!state.baseline) return;
+    const identities = el("dl", { class: "identities" });
+    for (const key of ["original", "candidate", "baseline"]) {
+      identities.append(el("dt", {}, `${key} identity`),
+        el("dd", { class: "mono" }, state.baseline.sourceIdentities[key]));
+    }
+    const limits = el("ul", { class: "limits" });
+    for (const limit of state.baseline.limits) limits.append(el("li", {}, limit));
+    nodes.baselinePanel.append(
+      el("p", { class: "mono" },
+        `origin ${state.baseline.origin} · exit ${state.baseline.execution.exitCode === null ? "unknown" : state.baseline.execution.exitCode}`
+        + ` · ${describeCounts(state.baseline.execution.counts)}`),
+      el("details", {},
+        el("summary", {}, "Evidence: logs, identities and limits"),
+        executionEvidence("Baseline", state.baseline.execution),
+        identities,
+        limits,
+      ),
+    );
+  }
+
   function renderProposal(state) {
+    const baselinePassed = state.baseline !== null && state.baseline.status === "PASS";
     nodes.proposeButton.disabled =
-      !state.session || !state.selectedChangeId || Boolean(state.inFlight)
+      !state.session || !baselinePassed || Boolean(state.inFlight)
       || state.proposalPending
       || Boolean(state.proposal)
       || (state.budgetKnown && state.session && state.session.callsUsed >= state.session.limit);
-    nodes.proposeButton.textContent = state.budgetKnown ? "Propose cases" : "Refresh usage (no model call)";
+    nodes.proposeButton.textContent = state.budgetKnown ? "Ask Muse for breaking baskets" : "Refresh usage (no model call)";
     if (state.inFlight === "propose") {
-      setStatus(nodes.proposeStatus, "Asking Muse for verification cases…", "pending");
+      setStatus(nodes.proposeStatus, "Asking Muse for baskets that could break this change…", "pending");
     } else if (state.inFlight === "usage") {
       setStatus(nodes.proposeStatus, "Reading the durable budget; no model call…", "pending");
     } else if (state.errors.propose) {
-      if (state.errors.propose.startsWith("NO_CASES_PROPOSED:")) {
+      if (state.errors.propose === NO_CASES_MESSAGE) {
         setStatus(nodes.proposeStatus, state.errors.propose, "warn");
       } else {
         setStatus(nodes.proposeStatus, `Proposal failed and was not retried: ${state.errors.propose}`, "error");
@@ -925,6 +1269,8 @@ function startBrowserApp() {
       setStatus(nodes.proposeStatus, "A prior call may have consumed budget. Refresh usage before another model request.", "warn");
     } else if (state.session && state.session.callsUsed >= state.session.limit) {
       setStatus(nodes.proposeStatus, "The model call budget for this session is used up.", "warn");
+    } else if (state.session && !baselinePassed) {
+      setStatus(nodes.proposeStatus, "Muse is only asked after the baseline actually passes.", null);
     } else {
       setStatus(nodes.proposeStatus, "", null);
     }
@@ -935,7 +1281,7 @@ function startBrowserApp() {
       list.append(
         el("li", {},
           el("p", { class: "case-lines mono" }, describeLines(entry.lines)),
-          el("p", { class: "case-expected" }, `Proposed expected total: ${formatMinorUnits(entry.expectedTotal)}`),
+          el("p", { class: "case-expected" }, `Proposed expected total: ${formatPence(entry.expectedTotal)}`),
           el("p", { class: "case-rationale" }, entry.rationale),
         ),
       );
@@ -953,9 +1299,9 @@ function startBrowserApp() {
           const input = el("input", {
             type: "text",
             id: `exp-${entry.id}`,
-            inputmode: "numeric",
+            inputmode: "decimal",
             autocomplete: "off",
-            maxlength: "6",
+            maxlength: "8",
             value: state.expectations[entry.id].raw,
           });
           input.addEventListener("input", () => {
@@ -964,11 +1310,11 @@ function startBrowserApp() {
           nodes.expectationRows.append(
             el("div", { class: "exp-row" },
               el("label", { for: `exp-${entry.id}` },
-                `Expected total for ${describeLines(entry.lines)} (minor units)`),
+                `Expected total in pounds for ${describeLines(entry.lines)}`),
               input,
               el("span", { class: "badge edited", hidden: true, "data-role": "edited" }, "reviewer corrected"),
               el("span", { class: "hint", hidden: true, "data-role": "hint" },
-                "Enter a whole number between 0 and 400000."),
+                "Enter pounds with at most two decimals, between £0.00 and £4000.00."),
             ),
           );
         }
@@ -995,7 +1341,7 @@ function startBrowserApp() {
     } else if (state.errors.accept) {
       setStatus(nodes.acceptStatus, `Acceptance failed: ${state.errors.accept}`, "error");
     } else if (state.accepted) {
-      setStatus(nodes.acceptStatus, "Expectations locked before any execution outcome was observed.", "good");
+      setStatus(nodes.acceptStatus, "Reviewed expectations locked before this proposed-case comparison.", "good");
     } else {
       setStatus(nodes.acceptStatus, "", null);
     }
@@ -1006,7 +1352,7 @@ function startBrowserApp() {
       list.append(
         el("li", {},
           el("span", { class: "mono" }, describeLines(entry.lines)),
-          el("span", {}, ` → expected ${formatMinorUnits(entry.expectedTotal)} `),
+          el("span", {}, ` → expected ${formatPence(entry.expectedTotal)} `),
           el("span", {
             class: entry.expectationOrigin === "REVIEWER_CORRECTED" ? "badge edited" : "badge meta",
           }, entry.expectationOrigin === "REVIEWER_CORRECTED" ? "reviewer corrected" : "Muse value, reviewer accepted"),
@@ -1049,8 +1395,8 @@ function startBrowserApp() {
     const table = el("table", { class: "compare-table" },
       el("thead", {},
         el("tr", {},
-          el("th", {}, "Case"),
-          el("th", {}, "Expected"),
+          el("th", {}, "Basket"),
+          el("th", {}, "Expected (rule)"),
           el("th", {}, "Original"),
           el("th", {}, "Candidate"),
         ),
@@ -1058,18 +1404,24 @@ function startBrowserApp() {
     );
     const tbody = el("tbody", {});
     for (const row of state.comparison.rows) {
+      const acceptedCase = state.accepted.acceptedCases.find((entry) => entry.caseId === row.caseId);
       const cell = (outcome) => {
         if (outcome.error !== null) {
           return el("td", { class: "bad" }, `error: ${outcome.error}`);
         }
         const matches = outcome.value === row.expectedTotal;
         return el("td", { class: matches ? "good" : "bad" },
-          `${outcome.value}${matches ? " ✓" : " ✗"}`);
+          `${formatPence(outcome.value)}${matches ? " ✓" : " ✗"}`);
       };
       tbody.append(
         el("tr", {},
-          el("td", { class: "mono" }, row.caseId),
-          el("td", {}, String(row.expectedTotal)),
+          el("td", {},
+            el("span", { class: "mono" }, acceptedCase ? describeLines(acceptedCase.lines) : row.caseId),
+            el("p", {}, el("strong", {}, row.candidate.error !== null
+              ? "Charge comparison unavailable."
+              : describeChargeDifference(row.candidate.value, row.expectedTotal))),
+          ),
+          el("td", {}, formatPence(row.expectedTotal)),
           cell(row.original),
           cell(row.candidate),
         ),
@@ -1078,17 +1430,19 @@ function startBrowserApp() {
     table.append(tbody);
     const identities = el("dl", { class: "identities" });
     for (const [key, value] of Object.entries(state.comparison.sourceIdentities)) {
-      identities.append(el("dt", {}, key), el("dd", {}, value));
+      identities.append(el("dt", {}, key), el("dd", { class: "mono" }, value));
     }
     const limits = el("ul", { class: "limits" });
     for (const limit of state.comparison.limits) {
       limits.append(el("li", {}, limit));
     }
     nodes.comparisonPanel.append(
-      el("p", { class: "fineprint" }, `origin ${state.comparison.origin} · run ${state.comparison.runId}`),
+      el("p", { class: "fineprint" },
+        `origin ${state.comparison.origin} · run ${state.comparison.runId} · ` +
+        "expectations came from the rule, not from the original implementation"),
       table,
       el("details", {},
-        el("summary", {}, "Source identities and limits"),
+        el("summary", {}, "Evidence: source identities and limits"),
         identities,
         limits,
       ),
@@ -1096,14 +1450,18 @@ function startBrowserApp() {
   }
 
   function renderExport(state) {
+    const reproduced = state.comparison !== null && state.comparison.status === "REPRODUCED";
     nodes.exportButton.disabled =
-      !state.comparison || Boolean(state.inFlight) || Boolean(state.exportResult);
+      !reproduced || Boolean(state.inFlight) || Boolean(state.exportResult);
     if (state.inFlight === "export") {
-      setStatus(nodes.exportStatus, "Building the regression test…", "pending");
+      setStatus(nodes.exportStatus, "Asking the backend to persist the regression test…", "pending");
     } else if (state.errors.export) {
       setStatus(nodes.exportStatus, `Export failed: ${state.errors.export}`, "error");
     } else if (state.exportResult) {
-      setStatus(nodes.exportStatus, "Regression test ready below. It is shown as text and never executed here.", "good");
+      setStatus(nodes.exportStatus, "Regression test persisted by the server. Shown as text; never executed here.", "good");
+    } else if (state.comparison && !reproduced) {
+      setStatus(nodes.exportStatus,
+        "Only a REPRODUCED counterexample is worth keeping as a regression test.", null);
     } else {
       setStatus(nodes.exportStatus, "", null);
     }
@@ -1127,22 +1485,95 @@ function startBrowserApp() {
         `The download below is an optional local copy only.`),
       el("p", { class: "fineprint mono" }, `sha256 ${exported.sha256} · origin ${exported.origin}`),
       download,
-      el("details", { open: true },
+      el("details", {},
         el("summary", {}, "Test source (text only)"),
         el("pre", { class: "test-source" }, exported.testSource),
       ),
     );
   }
 
+  function renderRegression(state) {
+    nodes.regressionButton.disabled =
+      !state.exportResult || Boolean(state.inFlight) || Boolean(state.regression);
+    if (state.inFlight === "regression") {
+      setStatus(nodes.regressionStatus,
+        "Running the same exported test against the faulty source, then the pre-reviewed correction…", "pending");
+    } else if (state.errors.regression) {
+      setStatus(nodes.regressionStatus, `Regression proof failed: ${state.errors.regression}`, "error");
+    } else if (state.regression) {
+      if (state.regression.status === "RED_THEN_GREEN") {
+        setStatus(nodes.regressionStatus,
+          "RED then GREEN — the same test failed on the faulty source and passed on the pre-reviewed correction.", "good");
+      } else {
+        setStatus(nodes.regressionStatus,
+          "INCONCLUSIVE — this run did not prove the regression red-to-green. It is not green proof.", "warn");
+      }
+    } else if (state.exportResult) {
+      setStatus(nodes.regressionStatus, "Not run yet.", null);
+    } else {
+      setStatus(nodes.regressionStatus, "", null);
+    }
+    clear(nodes.regressionPanel);
+    if (!state.regression) return;
+    const regression = state.regression;
+    const sameHash = state.exportResult !== null && regression.testSha256 === state.exportResult.sha256;
+    const limits = el("ul", { class: "limits" });
+    for (const limit of regression.limits) limits.append(el("li", {}, limit));
+    const rows = [
+      el("p", { class: "mono" },
+        `red: exit ${regression.red.exitCode === null ? "unknown" : regression.red.exitCode}`
+        + ` · ${describeCounts(regression.red.counts)}`),
+    ];
+    if (regression.green !== null) {
+      rows.push(el("p", { class: "mono" },
+        `green: exit ${regression.green.exitCode === null ? "unknown" : regression.green.exitCode}`
+        + ` · ${describeCounts(regression.green.counts)}`));
+    }
+    const evidence = el("details", {},
+      el("summary", {}, "Evidence: raw logs and limits"),
+      executionEvidence("Red run (faulty source)", regression.red),
+    );
+    if (regression.green !== null) {
+      evidence.append(executionEvidence("Green run (pre-reviewed correction)", regression.green));
+    }
+    evidence.append(
+      el("dl", { class: "identities" },
+        el("dt", {}, "test sha256"),
+        el("dd", { class: "mono" }, regression.testSha256),
+        el("dt", {}, "faulty source sha256"),
+        el("dd", { class: "mono" }, regression.correction.faultySha256),
+        el("dt", {}, "corrected source sha256"),
+        el("dd", { class: "mono" }, regression.correction.correctedSha256),
+      ),
+      limits,
+    );
+    nodes.regressionPanel.append(
+      ...rows,
+      el("p", {},
+        sameHash
+          ? "The test identity was unchanged between the red and green runs."
+          : "Warning: the test identity could not be matched to the exported test."),
+      el("p", { class: "fineprint" },
+        `Correction used: ${regression.correction.label} — a pre-reviewed prepared correction, not a Muse-generated fix. ` +
+        `Owned copies cleaned up: ${regression.cleanup.ownedCopiesRemoved ? "yes" : "no"}.`),
+      evidence,
+    );
+  }
+
   function render(state) {
     renderSession(state);
-    renderChanges(state);
+    renderChange(state);
+    renderBaseline(state);
     renderProposal(state);
     renderExpectations(state);
     renderComparison(state);
     renderExport(state);
+    renderRegression(state);
   }
 
+  nodes.baselineButton.addEventListener("click", () => {
+    store.runBaseline();
+  });
   nodes.proposeButton.addEventListener("click", () => {
     if (store.getState().budgetKnown) store.propose();
     else store.refreshUsage();
@@ -1158,6 +1589,9 @@ function startBrowserApp() {
   });
   nodes.exportButton.addEventListener("click", () => {
     store.exportTest();
+  });
+  nodes.regressionButton.addEventListener("click", () => {
+    store.runRegression();
   });
 
   store.subscribe(render);

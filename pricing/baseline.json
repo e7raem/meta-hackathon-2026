@@ -1,0 +1,8 @@
+{
+  "label": "Three ordinary baskets; no voucher-boundary coverage. Same assertions for original and proposed code.",
+  "cases": [
+    { "id": "eligible", "title": "One eligible item", "lines": [{ "amount": 1000, "discountEligible": true }], "expectedTotal": 900 },
+    { "id": "ineligible", "title": "One ineligible item", "lines": [{ "amount": 2000, "discountEligible": false }], "expectedTotal": 2000 },
+    { "id": "mixed", "title": "Mixed eligibility", "lines": [{ "amount": 2000, "discountEligible": true }, { "amount": 1000, "discountEligible": false }], "expectedTotal": 2800 }
+  ]
+}

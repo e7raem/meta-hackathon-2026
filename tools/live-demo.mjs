@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { open, readFile, rename, unlink, lstat, link } from "node:fs/promises";
+import { open, readFile, rename, unlink, lstat, link, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -9,14 +9,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { isCart } from "./pricing-runner.mjs";
 
 export const ORIGIN = "http://127.0.0.1:48761";
-export const STOP_AT = "2026-10-27T03:50:52.000Z";
+export const STOP_AT = "2026-10-27T14:00:00.000Z";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[a-zA-Z0-9-]{8,80}$/;
 const MODEL = "muse-spark-1.3";
 export const RUNTIME_FILES = ["pricing/rule.json", "pricing/original.ts", "pricing/change-a.ts",
   "pricing/change-b.ts", "tools/live-demo.mjs", "tools/pricing-runner.mjs",
-  "web/index.html", "web/app.js", "web/styles.css"];
+  "web/index.html", "web/app.js", "web/styles.css", "pricing/baseline.json",
+  "checks/baseline.test.mjs", "ota.yaml", "package.json"];
 const CHILDREN = new Set();
 const PROVIDER_REQUESTS = new Set();
 const sha = (value) => createHash("sha256").update(value).digest("hex");
@@ -219,7 +220,7 @@ export function checkRequest(method, path, headers, nonce) {
     requireThat(["/", "/app.js", "/styles.css", "/health", "/api/session"].includes(path), "NOT_FOUND", 404);
     return;
   }
-  requireThat(method === "POST" && ["/api/propose", "/api/accept", "/api/compare", "/api/export"].includes(path), "NOT_FOUND", 404);
+  requireThat(method === "POST" && ["/api/baseline", "/api/propose", "/api/accept", "/api/compare", "/api/export", "/api/regression"].includes(path), "NOT_FOUND", 404);
   requireThat(headers.origin === ORIGIN && headers["x-demo-token"] === nonce,
     "ORIGIN_OR_NONCE_REFUSED", 403);
   requireThat(headers["content-type"] === "application/json", "JSON_REQUIRED", 415);
@@ -256,10 +257,11 @@ function casesFromResponse(response) {
 }
 
 export function createController({ changes, scope, ledger, provider, runner, verifySources,
-  retain, persistExport, lifecycle = createLifecycle(), now = Date.now,
+  retain, persistExport, baselineCoverage, baselineIdentity, verification, lifecycle = createLifecycle(), now = Date.now,
   nonce = randomBytes(32).toString("hex") }) {
   const proposals = new Map(), accepted = new Map(), runs = new Map(), seen = new Set();
   const acceptedProposals = new Set();
+  const baselines = new Map();
   let busy = false;
   return {
     nonce,
@@ -269,7 +271,8 @@ export function createController({ changes, scope, ledger, provider, runner, ver
       const budget = await ledger.ready();
       lifecycle.check();
       return { mode: "LIVE", csrfToken: nonce, callsUsed: budget.reservations.length, limit: 6,
-        deadline: scope.deadline, changes: changes.map(({ originalSource, candidateSource, ...publicChange }) => publicChange) };
+        deadline: scope.deadline, baselineCoverage,
+        changes: changes.map(({ originalSource, candidateSource, ...publicChange }) => publicChange) };
     },
     async action(path, body) { return lifecycle.run(async () => {
       requireThat(now() < Date.parse(scope.deadline), "WINDOW_ENDED", 403);
@@ -280,10 +283,28 @@ export function createController({ changes, scope, ledger, provider, runner, ver
       try {
         await verifySources();
         lifecycle.check();
+        if (path === "/api/baseline") {
+          requireThat(exact(body, ["changeId", "requestId"]) && body.changeId === "a", "INVALID_FIELDS");
+          const change = changes.find((c) => c.id === body.changeId);
+          requireThat(change && verification && baselineCoverage, "BASELINE_UNAVAILABLE", 503);
+          const actual = await verification.baseline(); lifecycle.check();
+          const result = { kind: "baseline", origin: "LOCAL_EXECUTION", changeId: "a",
+            status: actual.status, coverage: baselineCoverage, execution: actual.execution,
+            sourceIdentities: { original: change.originalSha256, candidate: change.candidateSha256,
+              baseline: baselineIdentity },
+            limits: ["Six assertions: three ordinary baskets against each version.",
+              "This baseline does not exercise voucher-boundary cases or prove the whole PR."] };
+          requireThat(actual.cleanup?.ownedCopiesRemoved === true, "COPY_CLEANUP_INCOMPLETE", 503);
+          await retain("baseline-" + body.requestId, result); lifecycle.check();
+          if (actual.status === "PASS" && passing(actual.execution, 6)) baselines.set("a", result);
+          else baselines.delete("a");
+          return result;
+        }
         if (path === "/api/propose") {
           requireThat(exact(body, ["changeId", "requestId"]), "INVALID_FIELDS");
           const change = changes.find((c) => c.id === body.changeId);
           requireThat(change, "CHANGE_NOT_FOUND", 404);
+          requireThat(baselines.has(body.changeId), "PASSING_BASELINE_REQUIRED", 409);
           const callsUsed = await ledger.reserve(body.requestId);
           lifecycle.check();
           const packet = { rule: change.rule, originalSource: change.originalSource,
@@ -388,6 +409,25 @@ export function createController({ changes, scope, ledger, provider, runner, ver
             sha256: artifact.sha256, path: "evidence/regression.test.mjs", command: "ota run verify:export --agent" };
           await retain("export-" + body.runId, result);
           lifecycle.check();
+          run.exported = result;
+          return result;
+        }
+        if (path === "/api/regression") {
+          requireThat(exact(body, ["runId", "requestId"]), "INVALID_FIELDS");
+          const run = runs.get(body.runId);
+          requireThat(run?.result.status === "REPRODUCED" && run.exported && verification,
+            "REPRODUCED_EXPORT_REQUIRED", 409);
+          requireThat(!run.regressionAttempted, "REGRESSION_ALREADY_RUN", 409);
+          run.regressionAttempted = true;
+          const proof = await verification.regression({ testSource: run.exported.testSource,
+            testSha256: run.exported.sha256, expectedTests: run.result.rows.length,
+            expectedFailures: run.result.rows.filter((r) => r.candidate.value !== r.expectedTotal).length });
+          lifecycle.check();
+          const result = { kind: "regression", origin: "LOCAL_EXECUTION", runId: body.runId, ...proof,
+            limits: ["Same fixed-template test and accepted expectations; only the prepared implementation correction changes.",
+              "The correction was reviewed in advance, not generated by Muse.",
+              "Prepared local sample only: not all-input correctness, CI, a real customer PR or production assurance."] };
+          await retain("regression-" + body.runId, result); lifecycle.check();
           return result;
         }
         throw new Refusal("NOT_FOUND", 404);
@@ -472,17 +512,16 @@ export async function museProposal(keyFile, packet, deadline, {
   } finally { keyBuffer.fill(0); }
 }
 
-async function fixedRunner(node, changeId, cases, lifecycle) {
+async function captureChild({ executable, args, cwd, input = "", environment, lifecycle }) {
   lifecycle.check();
-  const input = JSON.stringify({ changeId, cases });
-  requireThat(Buffer.byteLength(input) <= 8192, "RUNNER_INPUT_LIMIT");
-  return new Promise((accept, reject) => {
-    const child = spawn(node, ["--max-old-space-size=128", join(ROOT, "tools/pricing-runner.mjs")], {
-      cwd: ROOT, env: buildRunnerEnvironment(node), stdio: ["pipe", "pipe", "pipe"], detached: true,
+  return new Promise((accept) => {
+    const child = spawn(executable, args, {
+      cwd, env: environment, stdio: ["pipe", "pipe", "pipe"], detached: true,
     });
     CHILDREN.add(child);
-    const output = []; let size = 0, refused = false, hardTimer;
+    const output = [], errors = []; let size = 0, refused = false, hardTimer;
     const stop = () => {
+      if (refused) return;
       refused = true;
       if (child.exitCode === null && child.signalCode === null) {
         try { process.kill(-child.pid, "SIGTERM"); } catch { /* Already exited. */ }
@@ -495,28 +534,176 @@ async function fixedRunner(node, changeId, cases, lifecycle) {
     };
     const timer = setTimeout(stop, 5000);
     child.stdout.on("data", (chunk) => { size += chunk.length; if (size > 65536) stop(); else output.push(chunk); });
-    child.stderr.on("data", (chunk) => { size += chunk.length; if (size > 65536) stop(); });
+    child.stderr.on("data", (chunk) => { size += chunk.length; if (size > 65536) stop(); else errors.push(chunk); });
     child.stdin.on("error", () => {});
     child.on("error", () => { refused = true; });
     child.on("close", (code) => {
       clearTimeout(timer); clearTimeout(hardTimer); CHILDREN.delete(child);
-      if (refused || code !== 0) { reject(new Refusal("RUNNER_FAILED", 502)); return; }
-      try { accept(JSON.parse(Buffer.concat(output).toString("utf8"))); }
-      catch { reject(new Refusal("RUNNER_OUTPUT_INVALID", 502)); }
+      accept({ exitCode: refused ? null : code, stdout: Buffer.concat(output).toString("utf8"),
+        stderr: Buffer.concat(errors).toString("utf8") });
     });
     child.stdin.end(input);
   });
+}
+
+async function fixedRunner(node, changeId, cases, lifecycle) {
+  const input = JSON.stringify({ changeId, cases });
+  requireThat(Buffer.byteLength(input) <= 8192, "RUNNER_INPUT_LIMIT");
+  const result = await captureChild({ executable: node,
+    args: ["--max-old-space-size=128", join(ROOT, "tools/pricing-runner.mjs")],
+    cwd: ROOT, input, environment: buildRunnerEnvironment(node), lifecycle });
+  requireThat(result.exitCode === 0, "RUNNER_FAILED", 502);
+  try { return JSON.parse(result.stdout); }
+  catch { throw new Refusal("RUNNER_OUTPUT_INVALID", 502); }
+}
+
+export function parseTaskExecution(result) {
+  const names = { tests: "tests", passed: "pass", failed: "fail", skipped: "skipped", cancelled: "cancelled" };
+  const counts = {};
+  for (const [key, label] of Object.entries(names)) {
+    const matches = [...result.stdout.matchAll(new RegExp("^# " + label + " (\\d+)$", "gm"))];
+    if (matches.length !== 1) return { ...result, counts: null };
+    counts[key] = Number(matches[0][1]);
+  }
+  const plans = [...result.stdout.matchAll(/^1\.\.(\d+)$/gm)];
+  const passed = [...result.stdout.matchAll(/^ok \d+ - /gm)].length;
+  const failed = [...result.stdout.matchAll(/^not ok \d+ - /gm)].length;
+  if (plans.length !== 1 || Number(plans[0][1]) !== counts.tests
+    || passed !== counts.passed || failed !== counts.failed
+    || counts.passed + counts.failed + counts.skipped + counts.cancelled !== counts.tests) {
+    return { ...result, counts: null };
+  }
+  return { ...result, counts };
+}
+
+function completeCounts(execution, tests) {
+  const c = execution.counts;
+  return c && c.tests === tests && c.skipped === 0 && c.cancelled === 0
+    && c.passed + c.failed === tests;
+}
+
+function passing(execution, tests) {
+  return execution.exitCode === 0 && completeCounts(execution, tests)
+    && execution.counts.passed === tests && execution.counts.failed === 0;
+}
+
+function assertionFailure(execution, tests, failures) {
+  return execution.exitCode === 1 && completeCounts(execution, tests)
+    && execution.counts.failed === failures
+    && [...execution.stdout.matchAll(/code: ['"]ERR_ASSERTION['"]/g)].length === failures;
+}
+
+export async function runDeclaredVerification({ task, cwd, nodeExecutable, otaExecutable, lifecycle }) {
+  requireThat(["verify:baseline", "verify:export"].includes(task), "VERIFICATION_TASK_REFUSED");
+  const dirs = { HOME: ".verification-home", TMPDIR: ".verification-tmp",
+    XDG_CONFIG_HOME: ".verification-config", XDG_CACHE_HOME: ".verification-cache" };
+  const environment = { ...buildRunnerEnvironment(nodeExecutable), CI: "true" };
+  for (const [key, name] of Object.entries(dirs)) {
+    lifecycle.check();
+    environment[key] = join(cwd, name);
+    await mkdir(environment[key], { mode: 0o700 });
+  }
+  lifecycle.check();
+  return parseTaskExecution(await captureChild({ executable: otaExecutable,
+    args: ["run", task, "--agent", "--stream"], cwd, environment, lifecycle }));
+}
+
+export function createPricingVerification({ root, runDirectory, sourceHashes, execute, lifecycle, verifySources }) {
+  async function checkCopy(copy, corrected = false) {
+    for (const file of RUNTIME_FILES) {
+      const expected = corrected && file === "pricing/change-a.ts" ? sourceHashes["pricing/change-b.ts"] : sourceHashes[file];
+      requireThat(sha(await readPrivate(join(copy, file), 131072)) === expected, "COPY_SOURCE_CHANGED", 503);
+    }
+  }
+  async function makeCopy(parent, name, corrected = false) {
+    const copy = join(parent, name); await mkdir(copy, { mode: 0o700 });
+    for (const file of RUNTIME_FILES) {
+      lifecycle.check();
+      const bytes = await readFile(join(root, file));
+      requireThat(sha(bytes) === sourceHashes[file], "SOURCE_IDENTITY_CHANGED", 503);
+      await mkdir(dirname(join(copy, file)), { recursive: true, mode: 0o700 });
+      await exclusiveBytes(join(copy, file), bytes);
+    }
+    if (corrected) {
+      const target = join(copy, "pricing/change-a.ts");
+      requireThat(sha(await readPrivate(target)) === sourceHashes["pricing/change-a.ts"], "COPY_SOURCE_CHANGED", 503);
+      const correction = await readFile(join(root, "pricing/change-b.ts"));
+      requireThat(sha(correction) === sourceHashes["pricing/change-b.ts"], "SOURCE_IDENTITY_CHANGED", 503);
+      await unlink(target); await exclusiveBytes(target, correction);
+    }
+    await checkCopy(copy, corrected); return copy;
+  }
+  async function owned(operation) {
+    lifecycle.check(); await verifySources(); lifecycle.check();
+    await privateDirectory(runDirectory);
+    const parent = await mkdtemp(join(runDirectory, "verification-"));
+    const identity = await lstat(parent);
+    let result;
+    try { result = await operation(parent); }
+    finally {
+      const current = await lstat(parent);
+      requireThat(current.isDirectory() && !current.isSymbolicLink()
+        && current.dev === identity.dev && current.ino === identity.ino, "OWNED_COPY_CHANGED", 503);
+      await rm(parent, { recursive: true });
+      try { await lstat(parent); throw new Refusal("COPY_CLEANUP_INCOMPLETE", 503); }
+      catch (e) { if (e.code !== "ENOENT") throw e; }
+    }
+    return { ...result, cleanup: { ownedCopiesRemoved: true } };
+  }
+  return {
+    async baseline() {
+      return owned(async (parent) => {
+        const copy = await makeCopy(parent, "baseline"); lifecycle.check();
+        const execution = await execute("verify:baseline", copy); lifecycle.check();
+        await checkCopy(copy);
+        const status = passing(execution, 6) ? "PASS"
+          : execution.counts && execution.counts.failed > 0
+            && assertionFailure(execution, 6, execution.counts.failed) ? "FAIL" : "INCONCLUSIVE";
+        return { execution, status };
+      });
+    },
+    async regression({ testSource, testSha256, expectedTests, expectedFailures }) {
+      requireThat(integer(expectedTests, 1, 3) && integer(expectedFailures, 1, expectedTests)
+        && sha(testSource) === testSha256, "REGRESSION_INPUT_REFUSED");
+      requireThat(sha(await readPrivate(join(root, "evidence/regression.test.mjs"))) === testSha256,
+        "PERSISTED_TEST_CHANGED", 503);
+      return owned(async (parent) => {
+        const faulty = await makeCopy(parent, "faulty");
+        const corrected = await makeCopy(parent, "corrected", true);
+        for (const copy of [faulty, corrected]) {
+          await mkdir(join(copy, "evidence"), { mode: 0o700 });
+          await exclusiveBytes(join(copy, "evidence/regression.test.mjs"), testSource);
+        }
+        lifecycle.check(); const red = await execute("verify:export", faulty); lifecycle.check();
+        await checkCopy(faulty);
+        let green = null;
+        const beforeGreen = (await Promise.all([faulty, corrected].map(async (copy) =>
+          sha(await readPrivate(join(copy, "evidence/regression.test.mjs"))) === testSha256))).every(Boolean);
+        if (beforeGreen && assertionFailure(red, expectedTests, expectedFailures)) {
+          lifecycle.check(); green = await execute("verify:export", corrected); lifecycle.check();
+        }
+        await checkCopy(corrected, true);
+        const sameTest = beforeGreen && (await Promise.all([root, faulty, corrected].map(async (copy) =>
+          sha(await readPrivate(join(copy, "evidence/regression.test.mjs"))) === testSha256))).every(Boolean);
+        return { red, green, sameTest, testSha256,
+          status: sameTest && green && passing(green, expectedTests) ? "RED_THEN_GREEN" : "INCONCLUSIVE",
+          correction: { kind: "PRE_REVIEWED_FIXED", label: "Prepared correction reviewed in advance; not Muse-generated.",
+            faultySha256: sourceHashes["pricing/change-a.ts"], correctedSha256: sourceHashes["pricing/change-b.ts"] } };
+      });
+    },
+  };
 }
 
 async function approval() {
   const file = process.env.META_DEMO_APPROVAL_FILE;
   requireThat(isAbsolute(file ?? ""), "APPROVAL_FILE_REQUIRED", 503);
   const a = JSON.parse((await readPrivate(file)).toString("utf8"));
-  requireThat(exact(a, ["version", "id", "deadline", "maxAdditionalRequests", "keyFile", "nodeExecutable", "nodeSha256", "sourceHashes"])
+  requireThat(exact(a, ["version", "id", "deadline", "maxAdditionalRequests", "keyFile", "nodeExecutable", "nodeSha256", "otaExecutable", "otaSha256", "sourceHashes"])
     && a.version === 1 && ID.test(a.id) && a.maxAdditionalRequests === 6
     && Number.isFinite(Date.parse(a.deadline)) && Date.parse(a.deadline) <= Date.parse(STOP_AT)
     && Date.now() < Date.parse(a.deadline) && isAbsolute(a.keyFile) && isAbsolute(a.nodeExecutable)
-    && HASH.test(a.nodeSha256) && exact(a.sourceHashes, RUNTIME_FILES)
+    && HASH.test(a.nodeSha256) && isAbsolute(a.otaExecutable) && HASH.test(a.otaSha256)
+    && exact(a.sourceHashes, RUNTIME_FILES)
     && Object.values(a.sourceHashes).every((x) => HASH.test(x)), "APPROVAL_INVALID", 503);
   return a;
 }
@@ -528,6 +715,7 @@ async function verifyFiles(a) {
       && sha(await readFile(path)) === a.sourceHashes[file], "SOURCE_IDENTITY_CHANGED", 503);
   }
   requireThat(sha(await readFile(a.nodeExecutable)) === a.nodeSha256, "NODE_IDENTITY_CHANGED", 503);
+  requireThat(sha(await readFile(a.otaExecutable)) === a.otaSha256, "OTA_IDENTITY_CHANGED", 503);
 }
 
 async function start() {
@@ -545,15 +733,25 @@ async function start() {
   const rule = JSON.parse(await readFile(join(ROOT, "pricing/rule.json"), "utf8"));
   requireThat(exact(rule, ["id", "title", "text", "domain"]) && rule.id === "pricing-v1", "RULE_INVALID", 503);
   const originalSource = await readFile(join(ROOT, "pricing/original.ts"), "utf8");
+  const baselineCoverage = JSON.parse(await readFile(join(ROOT, "pricing/baseline.json"), "utf8"));
+  requireThat(exact(baselineCoverage, ["label", "cases"]) && bounded(baselineCoverage.label)
+    && Array.isArray(baselineCoverage.cases) && baselineCoverage.cases.length === 3
+    && baselineCoverage.cases.every((c) => exact(c, ["id", "title", "lines", "expectedTotal"])
+      && bounded(c.id, 40) && bounded(c.title, 120) && isCart(c.lines)
+      && c.expectedTotal === ruleTotal(c.lines)), "BASELINE_INVALID", 503);
   const changes = [];
-  for (const id of ["a", "b"]) {
+  for (const id of ["a"]) {
     const candidateSource = await readFile(join(ROOT, "pricing/change-" + id + ".ts"), "utf8");
-    changes.push({ id, title: id === "a" ? "Move the voucher before the 10% discount"
-      : "Combine checkout calculations into one loop", rule, originalSource, candidateSource,
+    changes.push({ id, title: "Simplify checkout pricing", rule, originalSource, candidateSource,
       originalSha256: sha(originalSource), candidateSha256: sha(candidateSource),
       diff: "ORIGINAL\n" + originalSource + "\nPROPOSED\n" + candidateSource });
   }
-  const controller = createController({ changes, scope, ledger, lifecycle,
+  const verification = createPricingVerification({ root: ROOT, runDirectory, sourceHashes: a.sourceHashes,
+    lifecycle, verifySources: () => verifyFiles(a),
+    execute: (task, cwd) => runDeclaredVerification({ task, cwd, nodeExecutable: a.nodeExecutable,
+      otaExecutable: a.otaExecutable, lifecycle }) });
+  const controller = createController({ changes, scope, ledger, lifecycle, baselineCoverage,
+    baselineIdentity: a.sourceHashes["pricing/baseline.json"], verification,
     verifySources: () => verifyFiles(a),
     provider: (packet) => museProposal(a.keyFile, packet, a.deadline, { lifecycle }),
     runner: (id, cases) => fixedRunner(a.nodeExecutable, id, cases, lifecycle),

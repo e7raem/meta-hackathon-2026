@@ -1,4 +1,4 @@
-/* Pricing change reviewer — warm editorial styling. Local assets only. */
+/* Break This PR — warm editorial styling. Local assets only. */
 
 [hidden] { display: none !important; }
 
@@ -33,13 +33,13 @@ body {
 #app {
   max-width: 46rem;
   margin: 0 auto;
-  padding: 2.5rem 1.25rem 4rem;
+  padding: 1.5rem 1.25rem 4rem;
 }
 
 .masthead {
   border-bottom: 3px double var(--line);
-  padding-bottom: 1.5rem;
-  margin-bottom: 2rem;
+  padding-bottom: 1rem;
+  margin-bottom: 1.25rem;
 }
 
 .kicker {
@@ -216,20 +216,29 @@ summary:focus-visible {
   margin-top: 1rem;
 }
 
-.change-options {
+.change-detail .pr-title {
+  margin-top: 0;
+}
+
+.pr-title {
+  font-style: italic;
+  color: var(--muted);
+  font-weight: 400;
+  margin: 0 0 0.6rem;
+}
+
+.coverage-list {
+  margin: 0.6rem 0 0;
+  padding-left: 1.2rem;
   display: grid;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
+  gap: 0.45rem;
+  font-size: 0.9rem;
 }
 
-.change-option {
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-}
-
-.change-option label {
-  cursor: pointer;
+.log {
+  max-height: 14rem;
+  overflow: auto;
+  white-space: pre-wrap;
 }
 
 details {
