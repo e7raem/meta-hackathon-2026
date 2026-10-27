@@ -142,6 +142,8 @@ Open **http://127.0.0.1:48761** after Ota reports readiness. Startup makes no mo
 request: use the UI to run the baseline, ask Muse, review expected totals and
 compare. Two requests allow one initial proposal and one feedback turn; native
 baseline, comparison, control and regression checks do not consume model requests.
+The limit is shared across both examples. Set it to four if you want one proposal
+and one feedback turn for each example.
 Press Ctrl-C to stop. The service also stops at its recorded session deadline.
 
 Preparation creates a private approval and ledger under ignored `evidence/live/`,
