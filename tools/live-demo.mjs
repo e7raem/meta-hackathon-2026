@@ -782,6 +782,7 @@ async function museStructuredRequest(keyFile, packet, deadline, prompt, schemaNa
   const input = prompt + JSON.stringify(packet);
   requireThat(Buffer.byteLength(input) <= 16384, "PACKET_TOO_LARGE");
   const body = JSON.stringify({ model: MODEL, input, store: false, stream: false, tools: [],
+    ...(schemaName === "pricing_feedback" ? { reasoning: { effort: "low" } } : {}),
     max_output_tokens: 4096, text: { format: { type: "json_schema", name: schemaName,
       strict: true, schema } } });
     return await new Promise((accept, reject) => {

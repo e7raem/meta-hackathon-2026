@@ -493,6 +493,11 @@ test("response error, aborted and premature close settle once and retain consume
     assert.equal(requestBody.store, false);
     assert.equal(requestBody.stream, false);
     assert.deepEqual(requestBody.tools, []);
+    assert.deepEqual(Object.keys(requestBody).sort(),
+      ["model", "input", "store", "stream", "tools", "max_output_tokens", "text"].sort());
+    assert.equal(Object.hasOwn(requestBody, "reasoning"), false, "initial discovery keeps its existing reasoning policy");
+    assert.equal(requestBody.text.format.name, "pricing_cases");
+    assert.equal(requestBody.text.format.strict, true);
     assert.equal(f.calls.retained[0].value.outcome, "FAILED_OR_UNKNOWN_CONSUMED");
     assert.equal(destroyed, true);
   }
@@ -766,7 +771,7 @@ test("retained-root export and regression append fresh request records without c
   });
 });
 
-test("feedback provider reuses the fixed model/4096 cap, closed schema and redaction without executable tools", async () => {
+test("feedback alone uses fixed low reasoning with the same model/4096 cap, closed schema and no tools", async () => {
   let body, options, url; const req = new EventEmitter(), res = new EventEmitter();
   const keyText = "synthetic-test-credential-never-real", key = Buffer.from(keyText);
   req.destroy = () => req.emit("close");
@@ -774,6 +779,7 @@ test("feedback provider reuses the fixed model/4096 cap, closed schema and redac
   res.statusCode = 200; res.complete = true;
   const raw = await museFeedback("unused", { public: "synthetic outputs" }, scope.deadline, {
     now: () => NOW, readCredential: async () => key,
+    reasoning: { effort: "max" }, reasoning_effort: "high", max_output_tokens: 99999,
     request: (u, o, callback) => {
       url = u; options = o;
       queueMicrotask(() => { callback(res); res.emit("data", Buffer.from(JSON.stringify({ echo: keyText })));
@@ -783,8 +789,48 @@ test("feedback provider reuses the fixed model/4096 cap, closed schema and redac
   assert.equal(url, "https://api.meta.ai/v1/responses"); assert.equal(options.method, "POST");
   assert.equal(body.max_output_tokens, 4096); assert.equal(body.model, "muse-spark-1.3");
   assert.equal(body.store, false); assert.equal(body.stream, false); assert.deepEqual(body.tools, []);
+  assert.deepEqual(body.reasoning, { effort: "low" });
+  assert.deepEqual(Object.keys(body).sort(),
+    ["model", "input", "store", "stream", "tools", "reasoning", "max_output_tokens", "text"].sort());
+  assert.equal(Object.hasOwn(body, "reasoning_effort"), false, "no Chat Completions syntax or caller wire override");
+  assert.equal(body.text.format.type, "json_schema"); assert.equal(body.text.format.strict, true);
   assert.equal(body.text.format.name, "pricing_feedback"); assert.equal(body.text.format.schema.additionalProperties, false);
   assert.equal(raw.echo, "[REDACTED]"); assert.ok(key.every((x) => x === 0));
+});
+
+test("reasoning-heavy incomplete feedback is retained, refused and consumed once without retry", async () => {
+  const incomplete = { status: "incomplete", model: "muse-spark-1.3", error: null,
+    incomplete_details: { reason: "max_output_tokens" },
+    usage: { input_tokens: 1547, output_tokens: 4096, output_tokens_details: { reasoning_tokens: 4094 } },
+    output: [{ type: "message", content: [{ type: "output_text", text: '{"bindingId":' }] }] };
+  let dispatches = 0, body;
+  const key = Buffer.from("synthetic-test-credential-never-real");
+  const f = await fixture({ feedbackProvider: (packet) => museFeedback("unused-fixture-path", packet, scope.deadline, {
+    now: () => NOW, readCredential: async () => key,
+    request: (_url, _options, callback) => {
+      dispatches++;
+      const req = new EventEmitter(), res = new EventEmitter();
+      req.destroy = () => req.emit("close");
+      req.end = (value) => { body = JSON.parse(value); };
+      res.statusCode = 200; res.complete = true;
+      queueMicrotask(() => {
+        callback(res); res.emit("data", Buffer.from(JSON.stringify(incomplete)));
+        res.emit("end"); req.emit("close");
+      });
+      return req;
+    },
+  }) });
+  const { proposal, run, control } = await preparedRun(f);
+  const request = { runId: run.runId, controlId: control.controlId, requestId: "feedback-incomplete-once" };
+  await assert.rejects(() => f.controller.action("/api/feedback", request), /MODEL_INCOMPLETE/);
+  assert.deepEqual(body.reasoning, { effort: "low" }); assert.equal(body.max_output_tokens, 4096);
+  assert.deepEqual(f.calls.retained.find((entry) => entry.name === "feedback-model-2").value, incomplete);
+  assert.equal(f.calls.retained.some((entry) => entry.name === "feedback-" + proposal.proposalId), false);
+  assert.equal(f.calls.reservations, 2); assert.equal(f.calls.markers.size, 1);
+  await assert.rejects(() => f.controller.action("/api/feedback", { ...request, requestId: "feedback-no-retry" }),
+    /FEEDBACK_ALREADY_ATTEMPTED/);
+  assert.equal(dispatches, 1); assert.equal(f.calls.reservations, 2);
+  assert.ok(key.every((byte) => byte === 0));
 });
 
 async function sessionFixture(operation) {
