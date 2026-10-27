@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { join, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RUNTIME_FILES, createLifecycle, createPricingVerification,
-  runDeclaredVerification, parseTaskExecution, exportRegression, fixedRunner } from "../tools/live-demo.mjs";
+  runDeclaredVerification, parseTaskExecution, exportRegression, persistRegression, fixedRunner } from "../tools/live-demo.mjs";
 
 // Authored offline integration fixtures, never new Muse or customer evidence.
 const SOURCE = fileURLToPath(new URL("..", import.meta.url));
@@ -26,25 +26,26 @@ function tap({ tests = 2, passed = 0, failed = 2, skipped = 0, cancelled = 0, as
 async function owned(operation) {
   await mkdir(TEMP, { recursive: true, mode: 0o700 });
   const owner = await mkdtemp(join(TEMP, "owned-"));
-  const root = join(owner, "source"), runDirectory = join(owner, "records");
+  const root = join(owner, "source"), scopeId = "delivery-fixture";
+  const runDirectory = join(root, "evidence/live", scopeId);
+  const exportId = randomUUID(), runId = "delivery-run", scenarioId = "a";
   const sourceHashes = {};
   try {
-    await mkdir(root, { mode: 0o700 }); await mkdir(runDirectory, { mode: 0o700 });
+    await mkdir(root, { mode: 0o700 }); await mkdir(runDirectory, { recursive: true, mode: 0o700 });
     for (const file of RUNTIME_FILES) {
       const data = await readFile(join(SOURCE, file)); sourceHashes[file] = sha(data);
       await mkdir(dirname(join(root, file)), { recursive: true, mode: 0o700 });
       await writeFile(join(root, file), data, { mode: 0o600, flag: "wx" });
     }
-    await mkdir(join(root, "evidence"), { mode: 0o700 });
     const testSource = exportRegression("a", cases), testSha256 = sha(testSource);
-    await writeFile(join(root, "evidence/regression.test.mjs"), testSource, { mode: 0o600, flag: "wx" });
+    const exported = await persistRegression({ root, runDirectory, scopeId, runId, scenarioId, exportId, source: testSource });
     const verifySources = async () => {
       for (const file of RUNTIME_FILES) assert.equal(sha(await readFile(join(root, file))), sourceHashes[file]);
     };
-    await operation({ root, runDirectory, sourceHashes, verifySources, testSource, testSha256 });
+    await operation({ root, runDirectory, sourceHashes, verifySources, testSource, testSha256, scopeId, exportId, runId, scenarioId });
     await verifySources();
-    assert.equal(sha(await readFile(join(root, "evidence/regression.test.mjs"))), testSha256);
-    assert.deepEqual(await readdir(runDirectory), [], "all owned verification copies were actually removed");
+    assert.equal(sha(await readFile(join(root, exported.path))), testSha256);
+    assert.deepEqual(await readdir(runDirectory), ["exports"], "only the frozen export remains; owned verification copies were removed");
   } finally { await rm(owner, { recursive: true, force: true }); }
 }
 
@@ -125,6 +126,27 @@ test("a changed generated test cannot be called unchanged red-green", async () =
       } });
     const proof = await verification.regression({ ...input, expectedTests: 2, expectedFailures: 2 });
     assert.equal(proof.sameTest, false); assert.equal(proof.status, "INCONCLUSIVE");
+  });
+});
+
+test("export identity, committed record and frozen bytes are checked before any verification copy runs", async () => {
+  await owned(async (input) => {
+    let calls = 0;
+    const verification = createPricingVerification({ ...input, lifecycle: createLifecycle(),
+      execute: async () => { calls++; throw new Error("must not execute"); } });
+    for (const changed of [{ runId: "another-run" }, { scopeId: "another-scope" }, { scenarioId: "b" }]) {
+      const selected = changed.scopeId ? createPricingVerification({ ...input, ...changed, lifecycle: createLifecycle() }) : verification;
+      await assert.rejects(() => selected.regression({ ...input, ...changed, expectedTests: 2, expectedFailures: 2 }), /EXPORT_BINDING_CHANGED/);
+    }
+    const artifact = join(input.runDirectory, "exports", input.exportId, "regression.test.mjs");
+    const recordPath = join(artifact, "../record.json"), record = await readFile(recordPath);
+    await rm(recordPath);
+    await assert.rejects(() => verification.regression({ ...input, expectedTests: 2, expectedFailures: 2 }), /ENOENT/);
+    await writeFile(recordPath, record, { mode: 0o600 });
+    await writeFile(artifact, "// altered fixture\n");
+    await assert.rejects(() => verification.regression({ ...input, expectedTests: 2, expectedFailures: 2 }), /PERSISTED_TEST_CHANGED/);
+    await writeFile(artifact, input.testSource);
+    assert.equal(calls, 0);
   });
 });
 

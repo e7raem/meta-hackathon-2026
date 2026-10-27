@@ -132,6 +132,8 @@ function regressionBody(overrides = {}) {
     kind: "regression",
     origin: "LOCAL_EXECUTION",
     runId: "run-1",
+    exportId: "11111111-1111-4111-8111-111111111111",
+    scenarioId: "a",
     status: "RED_THEN_GREEN",
     testSha256: HEX_C,
     sameTest: true,
@@ -243,7 +245,10 @@ function exportBody(overrides = {}) {
     kind: "export",
     origin: "FIXTURE",
     filename: "regression.test.mjs",
-    path: "evidence/regression.test.mjs",
+    runId: "run-1",
+    exportId: "11111111-1111-4111-8111-111111111111",
+    scenarioId: "a",
+    path: "evidence/live/fixture-session/exports/11111111-1111-4111-8111-111111111111/regression.test.mjs",
     testSource: "// INERT_TEST_SOURCE synthetic regression test body\n",
     sha256: HEX_C,
     command: "ota run verify:export --agent",
@@ -535,7 +540,9 @@ test("full journey sends the exact contract bodies, headers and fresh requestIds
   });
   assert.deepEqual(JSON.parse(posts[3].options.body), { acceptedId: "acc-1", requestId: "req-4" });
   assert.deepEqual(JSON.parse(posts[4].options.body), { runId: "run-1", requestId: "req-5" });
-  assert.deepEqual(JSON.parse(posts[5].options.body), { runId: "run-1", requestId: "req-6" });
+  assert.deepEqual(JSON.parse(posts[5].options.body), {
+    runId: "run-1", exportId: exportBody().exportId, requestId: "req-6",
+  });
 
   const state = store.getState();
   assert.equal(state.baseline.status, "PASS");
@@ -722,6 +729,11 @@ test("a claimed RED_THEN_GREEN without matching evidence is rejected, never show
   const echoed = await wrongRun.store.runRegression();
   assert.equal(echoed.ok, false, "a regression for a different runId is refused");
   assert.equal(wrongRun.store.getState().regression, null);
+  const wrongExport = await atExported([
+    () => respond(200, regressionBody({ exportId: "22222222-2222-4222-8222-222222222222" })),
+  ]);
+  assert.equal((await wrongExport.store.runRegression()).ok, false);
+  assert.equal(wrongExport.store.getState().regression, null);
 });
 
 test("budget refresh refuses a different nonce or regressed count rather than adopting or resetting it", async () => {
@@ -848,7 +860,7 @@ test("export requires a REPRODUCED comparison; the exported test is held as iner
   assert.equal(exported.testSource, "// INERT_TEST_SOURCE synthetic regression test body\n",
     "the test source is stored verbatim as text, never evaluated");
   assert.equal(exported.command, "ota run verify:export --agent");
-  assert.equal(exported.path, "evidence/regression.test.mjs",
+  assert.equal(exported.path, exportBody().path,
     "the server-persisted path is reported literally");
   assert.deepEqual(await app.store.exportTest(), { ok: false, reason: "already_exported" });
 
@@ -862,6 +874,9 @@ test("export requires a REPRODUCED comparison; the exported test is held as iner
   assert.equal(validateExport(exportBody({ sha256: "xyz" })).ok, false);
   assert.equal(validateExport(exportBody({ testSource: "" })).ok, false);
   assert.equal(validateExport(exportBody({ testSource: 123 })).ok, false);
+  assert.equal(validateExport(exportBody({ exportId: "../../escape" })).ok, false);
+  assert.equal(validateExport(exportBody({ path: "evidence/regression.test.mjs" })).ok, false);
+  assert.equal(validateExport(exportBody({ exportId: "22222222-2222-4222-8222-222222222222" })).ok, false);
   assert.equal(validateExport(exportBody({ testSource: "x".repeat(16384) })).ok, true,
     "testSource up to 16 KiB is accepted");
   assert.equal(validateExport(exportBody({ testSource: "x".repeat(16385) })).ok, false,
@@ -1475,6 +1490,29 @@ test("server-persisted feedback attempt survives load and no contradictory contr
   unknown.store.getState().control.status = "INCONCLUSIVE";
   assert.deepEqual(await unknown.store.requestFeedback(), { ok: false, reason: "matching_control_required" });
   assert.equal(unknown.calls.length, 6);
+});
+
+test("configured one-to-six request limits validate and a one-request session cannot dispatch feedback", async () => {
+  for (let limit = 1; limit <= 6; limit++) {
+    assert.equal(validateSession(sessionBody({ limit, callsUsed: limit })).ok, true);
+  }
+  for (const limit of [0, 7, 1.5, "2"]) assert.equal(validateSession(sessionBody({ limit })).ok, false);
+  assert.equal(validateSession(sessionBody({ limit: 1, callsUsed: 2 })).ok, false);
+  const app = makeApp([
+    () => respond(200, sessionBody({ limit: 1 })),
+    () => respond(200, baselineBody()),
+    () => respond(200, proposalBody()),
+    () => respond(200, acceptedBody()),
+    () => respond(200, comparisonBody({ status: "REPRODUCED" })),
+    () => respond(200, controlBody()),
+  ]);
+  await app.store.loadSession(); await app.store.runBaseline(); await app.store.propose();
+  app.store.confirmReview(true); await app.store.accept(); await app.store.compare(); await app.store.runControl();
+  assert.deepEqual(await app.store.requestFeedback(), { ok: false, reason: "budget" });
+  assert.equal(app.store.getState().feedbackAttempted, false);
+  assert.equal(app.calls.length, 6);
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  assert.ok(source.includes("${callsUsed} of ${limit} model requests used"), "the actual UI label uses the configured cap");
 });
 
 test("new source stays text-only: no unsafe rendering sinks, model text treated as plain data", async () => {

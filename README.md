@@ -76,7 +76,7 @@ ota run verify:pricing --agent
 ota run verify:web --agent
 ```
 
-These three test tasks cover **73 checks** without an API key or a Meta request:
+These three test tasks cover the baseline, pricing and UI checks without an API key or a Meta request:
 
 | Task | What it checks |
 | --- | --- |
@@ -84,7 +84,7 @@ These three test tasks cover **73 checks** without an API key or a Meta request:
 | `verify:pricing` | Pricing arithmetic and the prepared faulty/correct implementations. |
 | `verify:web` | The browser workflow using mocked responses, including review and error states. |
 
-For the full **114-check offline suite**, select a trusted released Ota executable
+For the full offline suite, select a trusted released Ota executable
 and bind the integration tests to that exact file:
 
 ```sh
@@ -99,13 +99,52 @@ the offline suite are fixtures, not fresh Muse results.
 
 ### Interactive Demo
 
-The browser UI is in [`web/`](web/), served by
-[`tools/live-demo.mjs`](tools/live-demo.mjs) on `http://127.0.0.1:48761`.
-The recorded live window ended on October 27, 2026 at 14:00 UTC. This version
-blocks startup after that fixed source deadline; configuration alone cannot
-reopen it. A new live demo requires a reviewed source and configuration update.
-Use the offline commands above to reproduce the test coverage without provider
-credentials. Opening the HTML file alone does not start the backend.
+The local UI uses your Meta account. First save your API key in a private file
+**outside this checkout**, such as `$HOME/.config/meta-hackathon-2026/model-api-key`,
+with owner-only permissions (`chmod 600` on that file). Do not put the key in
+source, a shell command, browser code or a committed environment file.
+
+With the same qualified Node/Ota prerequisites, prepare a new session and start it:
+
+```sh
+export META_DEMO_KEY_FILE="$HOME/.config/meta-hackathon-2026/model-api-key"
+export META_DEMO_OTA_EXECUTABLE="$(command -v ota)"
+export META_DEMO_SESSION_MINUTES=20
+export META_DEMO_REQUEST_LIMIT=2
+export META_DEMO_APPROVAL_FILE="$(pwd -P)/evidence/live/recording-$(date -u +%Y%m%dT%H%M%SZ)/approval.json"
+
+ota run demo:live:budget --agent
+ota run demo:live --agent
+```
+
+Open **http://127.0.0.1:48761** after Ota reports readiness. Startup makes no model
+request: use the UI to run the baseline, ask Muse, review expected totals and
+compare. Two requests allow one initial proposal and one feedback turn; native
+baseline, comparison, control and regression checks do not consume model requests.
+Press Ctrl-C to stop. The service also stops at its recorded session deadline.
+
+Preparation creates a private approval and ledger under ignored `evidence/live/`,
+automatically recording the current sources and Node/Ota executable hashes. No
+manual hash list is needed. Choose 1-60 minutes and 1-6 requests. Existing session
+directories, legacy approvals, missing/partial ledgers and exhausted budgets are
+not reset or silently adopted. Source/binary changes or an expired window refuse
+startup. Prepare a deliberately new session path when you need a fresh session;
+do not edit stored hashes, limits or deadlines to revive an old one.
+
+If setup reports a missing input, set the named variable above. A private-key error
+means the file is missing, linked, inside the checkout or not owner-only. An
+existing-scope error means that path is already in use; historical state is kept
+unchanged. A partial/locked scope needs investigation, not an automatic retry.
+The offline tests do not need a key. Opening `web/index.html` alone does not start
+the backend, and historical recorded results are not imported into new sessions.
+
+Exports are append-only: each is saved under that session's
+`exports/<export-id>/regression.test.mjs` with its run, scenario and hash record.
+The app stages identical frozen test bytes at `evidence/regression.test.mjs` inside
+its disposable verification copies and runs `verify:export` there. A downloaded
+test is not a standalone checkout; use the UI's regression action for the paired
+red/green proof. A later session never overwrites a prior export or the legacy
+root artifact.
 
 ## Project Structure
 

@@ -38,7 +38,8 @@ const FEEDBACK_STATUSES = ["STOPPED", "FOLLOW_UP_PROPOSED", "INCONCLUSIVE"];
 export const FEEDBACK_EXPLANATION_MAX = 600;
 const EXPECTATION_ORIGINS = ["META_ACCEPTED", "REVIEWER_CORRECTED"];
 const EXPORT_FILENAME = "regression.test.mjs";
-const EXPORT_PATH = "evidence/regression.test.mjs";
+const EXPORT_ID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+const EXPORT_PATH_PATTERN = /^evidence\/live\/[A-Za-z0-9-]{8,80}\/exports\/([a-f0-9-]{36})\/regression\.test\.mjs$/;
 const EXPORT_COMMAND = "ota run verify:export --agent";
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const POUNDS_PATTERN = /^\d{1,4}(\.\d{1,2})?$/;
@@ -195,7 +196,8 @@ export function validateSession(data) {
   if (!MODES.includes(data.mode)) return fail("session mode must be literal LIVE or FIXTURE");
   if (!textOk(data.csrfToken, 500)) return fail("session csrfToken must be a non-empty string");
   if (!isIntegerIn(data.callsUsed, 0, 1000000)) return fail("session callsUsed must be a non-negative integer");
-  if (!isIntegerIn(data.limit, 1, 1000000)) return fail("session limit must be a positive integer");
+  if (!isIntegerIn(data.limit, 1, 6)) return fail("session limit must be an integer from 1 to 6");
+  if (data.callsUsed > data.limit) return fail("session consumption cannot exceed its request limit");
   if (!textOk(data.deadline, 100)) return fail("session deadline must be a non-empty string");
   if (!Array.isArray(data.changes) || data.changes.length !== 1) {
     return fail("session must contain exactly the one prepared change");
@@ -360,8 +362,11 @@ export function validateExport(data) {
   if (data.filename !== EXPORT_FILENAME) {
     return fail(`export filename must be exactly ${EXPORT_FILENAME}`);
   }
-  if (data.path !== EXPORT_PATH) {
-    return fail(`export path must be exactly ${EXPORT_PATH}`);
+  if (!EXPORT_ID_PATTERN.test(data.exportId) || !textOk(data.runId, 200) || data.scenarioId !== "a") {
+    return fail("export must identify its export, run and prepared scenario");
+  }
+  if (typeof data.path !== "string" || data.path.match(EXPORT_PATH_PATTERN)?.[1] !== data.exportId) {
+    return fail("export path must identify the exact session-local export");
   }
   if (!textOk(data.testSource, 16384)) {
     return fail("export testSource must be a non-empty string of at most 16 KiB");
@@ -417,6 +422,9 @@ export function validateRegression(data) {
   if (data.kind !== "regression") return fail('regression kind must be "regression"');
   if (data.origin !== LOCAL_EXECUTION) return fail("regression origin must be LOCAL_EXECUTION");
   if (!textOk(data.runId, 200)) return fail("regression runId must be a non-empty string");
+  if (!EXPORT_ID_PATTERN.test(data.exportId) || data.scenarioId !== "a") {
+    return fail("regression must identify its export and prepared scenario");
+  }
   if (!REGRESSION_STATUSES.includes(data.status)) {
     return fail("regression status must be RED_THEN_GREEN or INCONCLUSIVE");
   }
@@ -703,17 +711,19 @@ export function createApiClient({ fetchImpl, randomId }) {
         csrfToken,
         body: { runId },
       });
-      return ensure(validateExport(data), data);
+      ensure(validateExport(data), data);
+      if (data.runId !== runId) throw apiError("invalid_shape", "export echoed a different runId");
+      return data;
     },
-    async regression({ csrfToken, runId }) {
+    async regression({ csrfToken, runId, exportId, scenarioId }) {
       const data = await requestJson(API_PATHS.regression, {
         method: "POST",
         csrfToken,
-        body: { runId },
+        body: { runId, exportId },
       });
       ensure(validateRegression(data), data);
-      if (data.runId !== runId) {
-        throw apiError("invalid_shape", "regression echoed a different runId");
+      if (data.runId !== runId || data.exportId !== exportId || data.scenarioId !== scenarioId) {
+        throw apiError("invalid_shape", "regression echoed a different runId, exportId or scenarioId");
       }
       return data;
     },
@@ -1197,6 +1207,8 @@ export function createStore({ client }) {
         const regression = await client.regression({
           csrfToken: state.session.csrfToken,
           runId: rootComparison().runId,
+          exportId: state.exportResult.exportId,
+          scenarioId: state.exportResult.scenarioId,
         });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
         state.inFlight = null;
@@ -2008,7 +2020,7 @@ function startBrowserApp() {
     nodes.exportPanel.append(
       el("p", {},
         `The server persisted this test at ${exported.path}. ` +
-        `Run it with the fixed command "${exported.command}". ` +
+        `The app stages these identical bytes in its owned verification copies and runs "${exported.command}" there. ` +
         `The download below is an optional local copy only.`),
       el("p", { class: "fineprint mono" }, `sha256 ${exported.sha256} · origin ${exported.origin}`),
       download,

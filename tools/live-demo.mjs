@@ -1,15 +1,16 @@
 import { constants } from "node:fs";
-import { open, readFile, rename, unlink, lstat, link, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { open, readFile, rename, unlink, lstat, link, mkdir, mkdtemp, rm, realpath } from "node:fs/promises";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { spawn } from "node:child_process";
-import { dirname, join, resolve, isAbsolute } from "node:path";
+import { basename, dirname, join, resolve, isAbsolute } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isCart } from "./pricing-runner.mjs";
 
 export const ORIGIN = "http://127.0.0.1:48761";
-export const STOP_AT = "2026-10-27T14:00:00.000Z";
+export const MAX_SESSION_MINUTES = 60;
+export const MAX_SESSION_REQUESTS = 6;
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[a-zA-Z0-9-]{8,80}$/;
@@ -100,48 +101,64 @@ async function exclusiveJSON(path, value) {
   await exclusiveBytes(path, JSON.stringify(value, null, 2) + "\n");
 }
 
-export async function persistRegression({ artifact, record, scopeId, source, beforeCommit }) {
+export function exportArtifactPath(scopeId, exportId) {
+  requireThat(validId(scopeId) && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(exportId),
+    "EXPORT_ID_INVALID");
+  return `evidence/live/${scopeId}/exports/${exportId}/regression.test.mjs`;
+}
+
+export async function persistRegression({ root = ROOT, runDirectory, scopeId, runId, scenarioId, exportId, source, beforeCommit }) {
   requireThat(typeof source === "string" && Buffer.byteLength(source) <= 16384,
     "EXPORT_LIMIT");
-  await privateDirectory(dirname(artifact)); await privateDirectory(dirname(record));
-  let previous;
-  try { previous = JSON.parse((await readPrivate(record)).toString("utf8")); }
-  catch (e) { if (e.code !== "ENOENT") throw e; }
-  if (previous) {
-    requireThat(exact(previous, ["scopeId", "sha256"]) && previous.scopeId === scopeId
-      && HASH.test(previous.sha256) && sha(await readPrivate(artifact)) === previous.sha256,
-    "EXPORT_PREIMAGE_CHANGED", 409);
-  } else {
-    try { await lstat(artifact); throw new Refusal("EXISTING_EXPORT_NOT_OWNED", 409); }
-    catch (e) { if (e.code !== "ENOENT") throw e; }
-  }
+  const path = exportArtifactPath(scopeId, exportId);
+  requireThat(runDirectory === join(root, "evidence/live", scopeId) && validId(runId) && scenarioId === "a",
+    "EXPORT_BINDING_INVALID");
+  await privateDirectory(runDirectory);
+  const exports = join(runDirectory, "exports");
+  try { await mkdir(exports, { mode: 0o700 }); } catch (e) { if (e.code !== "EEXIST") throw e; }
+  await privateDirectory(exports);
+  const directory = join(exports, exportId);
+  await mkdir(directory, { mode: 0o700 });
+  await syncDirectory(exports);
   const digest = sha(source);
-  const pending = artifact + ".pending-" + randomUUID();
-  const pendingRecord = record + ".pending-" + randomUUID();
-  await exclusiveBytes(pending, source);
-  await exclusiveJSON(pendingRecord, { scopeId, sha256: digest });
+  const artifact = join(directory, "regression.test.mjs");
+  await exclusiveBytes(artifact, source);
   if (beforeCommit) await beforeCommit();
-  if (previous) {
-    requireThat(sha(await readPrivate(artifact)) === previous.sha256, "EXPORT_PREIMAGE_CHANGED", 409);
-    await rename(pending, artifact);
-  } else {
-    await link(pending, artifact); await unlink(pending);
-  }
-  await syncDirectory(dirname(artifact));
-  if (previous) await rename(pendingRecord, record);
-  else { await link(pendingRecord, record); await unlink(pendingRecord); }
-  await syncDirectory(dirname(record));
+  await exclusiveJSON(join(directory, "record.json"), { version: 2, scopeId, runId, scenarioId, exportId, sha256: digest });
   requireThat(sha(await readPrivate(artifact)) === digest, "EXPORT_PERSISTENCE_FAILED", 503);
-  return { sha256: digest, path: "evidence/regression.test.mjs" };
+  return { sha256: digest, path, exportId };
+}
+
+async function readStoredExport({ runDirectory, scopeId, runId, scenarioId, exportId, testSha256 }) {
+  exportArtifactPath(scopeId, exportId);
+  const directory = join(runDirectory, "exports", exportId);
+  await noLinkedParents(join(directory, "record.json")); await privateDirectory(directory);
+  const record = JSON.parse((await readPrivate(join(directory, "record.json"))).toString("utf8"));
+  requireThat(exact(record, ["version", "scopeId", "runId", "scenarioId", "exportId", "sha256"])
+    && record.version === 2 && record.scopeId === scopeId && record.runId === runId
+    && record.scenarioId === scenarioId && record.exportId === exportId && record.sha256 === testSha256,
+  "EXPORT_BINDING_CHANGED", 503);
+  const bytes = await readPrivate(join(directory, "regression.test.mjs"));
+  requireThat(sha(bytes) === testSha256, "PERSISTED_TEST_CHANGED", 503);
+  return bytes;
 }
 
 // Setup is deliberately separate: normal startup never creates or resets a budget.
+export function validateSessionWindow(scope, now = Date.now()) {
+  const issued = Date.parse(scope.issuedAt), deadline = Date.parse(scope.deadline);
+  requireThat(validId(scope.id) && integer(scope.limit, 1, MAX_SESSION_REQUESTS)
+    && Number.isFinite(issued) && Number.isFinite(deadline)
+    && new Date(issued).toISOString() === scope.issuedAt && new Date(deadline).toISOString() === scope.deadline
+    && deadline - issued >= 60000 && deadline - issued <= MAX_SESSION_MINUTES * 60000,
+  "SESSION_WINDOW_INVALID", 503);
+  requireThat(Number.isFinite(now) && issued <= now && now < deadline, "SESSION_WINDOW_EXPIRED_OR_FUTURE", 403);
+}
+
 export async function initializeBudget(path, scope) {
+  validateSessionWindow(scope, Date.parse(scope.issuedAt));
   await privateDirectory(dirname(path));
-  requireThat(ID.test(scope.id) && scope.limit === 6 && Number.isFinite(Date.parse(scope.deadline))
-    && Date.parse(scope.deadline) <= Date.parse(STOP_AT), "INVALID_SCOPE");
-  await exclusiveJSON(path, { version: 1, scopeId: scope.id, deadline: scope.deadline,
-    limit: 6, reservations: [] });
+  await exclusiveJSON(path, { version: 2, scopeId: scope.id, issuedAt: scope.issuedAt, deadline: scope.deadline,
+    limit: scope.limit, reservations: [] });
 }
 
 export class BudgetLedger {
@@ -152,11 +169,15 @@ export class BudgetLedger {
   async read() {
     await privateDirectory(dirname(this.path));
     const data = JSON.parse((await readPrivate(this.path)).toString("utf8"));
-    requireThat(exact(data, ["version", "scopeId", "deadline", "limit", "reservations"])
-      && data.version === 1 && data.scopeId === this.scope.id && data.deadline === this.scope.deadline
-      && data.limit === 6 && Array.isArray(data.reservations) && data.reservations.length <= 6
+    requireThat(data?.version !== 1, "LEGACY_SESSION_READ_ONLY", 503);
+    validateSessionWindow(this.scope, Date.parse(this.scope.issuedAt));
+    requireThat(exact(data, ["version", "scopeId", "issuedAt", "deadline", "limit", "reservations"])
+      && data.version === 2 && data.scopeId === this.scope.id && data.deadline === this.scope.deadline
+      && data.issuedAt === this.scope.issuedAt && data.limit === this.scope.limit
+      && Array.isArray(data.reservations) && data.reservations.length <= data.limit
       && data.reservations.every((r) => exact(r, ["requestId", "reservedAt"])
-        && ID.test(r.requestId) && Number.isFinite(Date.parse(r.reservedAt)))
+        && validId(r.requestId) && Number.isFinite(Date.parse(r.reservedAt))
+        && Date.parse(r.reservedAt) >= Date.parse(data.issuedAt) && Date.parse(r.reservedAt) < Date.parse(data.deadline))
       && new Set(data.reservations.map((r) => r.requestId)).size === data.reservations.length,
     "BUDGET_STATE_INVALID", 503);
     return data;
@@ -169,6 +190,9 @@ export class BudgetLedger {
   }
   async reserve(requestId) {
     requireThat(!this.poisoned && typeof requestId === "string" && ID.test(requestId), "BUDGET_UNCERTAIN", 503);
+    // Reject legacy/corrupt state before even creating a lock alongside it.
+    await this.read();
+    requireThat(this.now() >= Date.parse(this.scope.issuedAt), "SESSION_WINDOW_EXPIRED_OR_FUTURE", 403);
     const lockPath = this.path + ".lock";
     // A crash/uncertain commit leaves this durable lock for independent disposition.
     const lock = await open(lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -465,7 +489,7 @@ export function createController({ changes, scope, ledger, provider, runner, ver
       lifecycle.check();
       if (retainedInitial) requireThat(budget.reservations.length >= retainedInitial.proposal.callsUsed,
         "CHECKPOINT_BUDGET_PRECEDES_HISTORY", 503);
-      return { mode: "LIVE", csrfToken: nonce, callsUsed: budget.reservations.length, limit: 6,
+      return { mode: "LIVE", csrfToken: nonce, callsUsed: budget.reservations.length, limit: scope.limit,
         deadline: scope.deadline, baselineCoverage,
         ...(retainedInitial ? { retainedInitial, feedbackAttempted: feedbackAttempted.has(retainedInitial.proposal.proposalId)
           || await feedbackAttempts.has(retainedInitial.proposal.proposalId) } : {}),
@@ -663,30 +687,36 @@ export function createController({ changes, scope, ledger, provider, runner, ver
           const run = runs.get(body.runId);
           requireThat(run && run.result.status !== "INCONCLUSIVE", "MEANINGFUL_RUN_REQUIRED", 409);
           requireThat(baselines.has("a"), "PASSING_BASELINE_REQUIRED", 409);
+          requireThat(!run.exported, "RUN_ALREADY_EXPORTED", 409);
           const testSource = exportRegression(run.selected.change.id, run.selected.record.acceptedCases);
-          const artifact = await persistExport(testSource);
+          const exportId = randomUUID(), scenarioId = run.selected.change.id;
+          const artifact = await persistExport(testSource, { runId: body.runId, scenarioId, exportId });
           lifecycle.check();
-          requireThat(artifact?.sha256 === sha(testSource), "EXPORT_PERSISTENCE_FAILED", 503);
+          const path = exportArtifactPath(scope.id, exportId);
+          requireThat(artifact?.sha256 === sha(testSource) && artifact.path === path && artifact.exportId === exportId,
+            "EXPORT_PERSISTENCE_FAILED", 503);
           const result = { kind: "export", origin: "LIVE", filename: "regression.test.mjs", testSource,
-            sha256: artifact.sha256, path: "evidence/regression.test.mjs", command: "ota run verify:export --agent" };
+            exportId, runId: body.runId, scenarioId, sha256: artifact.sha256, path, command: "ota run verify:export --agent" };
           await retain("export-" + body.runId + "-" + body.requestId, result);
           lifecycle.check();
           run.exported = result;
           return result;
         }
         if (path === "/api/regression") {
-          requireThat(exact(body, ["runId", "requestId"]), "INVALID_FIELDS");
+          requireThat(exact(body, ["runId", "exportId", "requestId"]), "INVALID_FIELDS");
           const run = runs.get(body.runId);
-          requireThat(run?.result.status === "REPRODUCED" && run.exported && verification,
+          requireThat(run?.result.status === "REPRODUCED" && run.exported?.exportId === body.exportId && verification,
             "REPRODUCED_EXPORT_REQUIRED", 409);
           requireThat(baselines.has("a"), "PASSING_BASELINE_REQUIRED", 409);
           requireThat(!run.regressionAttempted, "REGRESSION_ALREADY_RUN", 409);
           run.regressionAttempted = true;
           const proof = await verification.regression({ testSource: run.exported.testSource,
             testSha256: run.exported.sha256, expectedTests: run.result.rows.length,
+            exportId: body.exportId, runId: body.runId, scenarioId: run.selected.change.id,
             expectedFailures: run.result.rows.filter((r) => r.candidate.value !== r.expectedTotal).length });
           lifecycle.check();
-          const result = { kind: "regression", origin: "LOCAL_EXECUTION", runId: body.runId, ...proof,
+          const result = { kind: "regression", origin: "LOCAL_EXECUTION", runId: body.runId,
+            exportId: body.exportId, scenarioId: run.selected.change.id, ...proof,
             limits: ["Same fixed-template test and accepted expectations; only the prepared implementation correction changes.",
               "The correction was reviewed in advance, not generated by Muse.",
               "Prepared local sample only: not all-input correctness, CI, a real customer PR or production assurance."] };
@@ -895,7 +925,7 @@ export async function runDeclaredVerification({ task, cwd, nodeExecutable, otaEx
     args: ["run", task, "--agent", "--stream"], cwd, environment, lifecycle }));
 }
 
-export function createPricingVerification({ root, runDirectory, sourceHashes, execute, lifecycle, verifySources }) {
+export function createPricingVerification({ root, runDirectory, scopeId, sourceHashes, execute, lifecycle, verifySources }) {
   async function checkCopy(copy, corrected = false) {
     for (const file of RUNTIME_FILES) {
       const expected = corrected && file === "pricing/change-a.ts" ? sourceHashes["pricing/change-b.ts"] : sourceHashes[file];
@@ -949,11 +979,12 @@ export function createPricingVerification({ root, runDirectory, sourceHashes, ex
         return { execution, status };
       });
     },
-    async regression({ testSource, testSha256, expectedTests, expectedFailures }) {
+    async regression({ testSource, testSha256, expectedTests, expectedFailures, exportId, runId, scenarioId }) {
       requireThat(integer(expectedTests, 1, 3) && integer(expectedFailures, 1, expectedTests)
         && sha(testSource) === testSha256, "REGRESSION_INPUT_REFUSED");
-      requireThat(sha(await readPrivate(join(root, "evidence/regression.test.mjs"))) === testSha256,
-        "PERSISTED_TEST_CHANGED", 503);
+      requireThat(scenarioId === "a", "EXPORT_BINDING_CHANGED", 503);
+      const binding = { runDirectory, scopeId, runId, scenarioId, exportId, testSha256 };
+      requireThat((await readStoredExport(binding)).toString("utf8") === testSource, "PERSISTED_TEST_CHANGED", 503);
       return owned(async (parent) => {
         const faulty = await makeCopy(parent, "faulty");
         const corrected = await makeCopy(parent, "corrected", true);
@@ -970,8 +1001,9 @@ export function createPricingVerification({ root, runDirectory, sourceHashes, ex
           lifecycle.check(); green = await execute("verify:export", corrected); lifecycle.check();
         }
         await checkCopy(corrected, true);
-        const sameTest = beforeGreen && (await Promise.all([root, faulty, corrected].map(async (copy) =>
+        const sameTest = beforeGreen && (await Promise.all([faulty, corrected].map(async (copy) =>
           sha(await readPrivate(join(copy, "evidence/regression.test.mjs"))) === testSha256))).every(Boolean);
+        await readStoredExport(binding);
         return { red, green, sameTest, testSha256,
           status: sameTest && green && passing(green, expectedTests) ? "RED_THEN_GREEN" : "INCONCLUSIVE",
           correction: { kind: "PRE_REVIEWED_FIXED", label: "Prepared correction reviewed in advance; not Muse-generated.",
@@ -981,44 +1013,171 @@ export function createPricingVerification({ root, runDirectory, sourceHashes, ex
   };
 }
 
-async function approval() {
-  const file = process.env.META_DEMO_APPROVAL_FILE;
-  requireThat(isAbsolute(file ?? ""), "APPROVAL_FILE_REQUIRED", 503);
-  const a = JSON.parse((await readPrivate(file)).toString("utf8"));
-  const keys = ["version", "id", "deadline", "maxAdditionalRequests", "keyFile", "nodeExecutable", "nodeSha256", "otaExecutable", "otaSha256", "sourceHashes"];
-  requireThat(exact(a, Object.hasOwn(a, "retainedCheckpoint") ? [...keys, "retainedCheckpoint"] : keys)
-    && a.version === 1 && ID.test(a.id) && a.maxAdditionalRequests === 6
-    && Number.isFinite(Date.parse(a.deadline)) && Date.parse(a.deadline) <= Date.parse(STOP_AT)
-    && Date.now() < Date.parse(a.deadline) && isAbsolute(a.keyFile) && isAbsolute(a.nodeExecutable)
-    && HASH.test(a.nodeSha256) && isAbsolute(a.otaExecutable) && HASH.test(a.otaSha256)
-    && exact(a.sourceHashes, RUNTIME_FILES)
-    && Object.values(a.sourceHashes).every((x) => HASH.test(x))
-    && (!Object.hasOwn(a, "retainedCheckpoint") || exact(a.retainedCheckpoint, ["path", "sha256"])
-      && isAbsolute(a.retainedCheckpoint.path) && HASH.test(a.retainedCheckpoint.sha256)), "APPROVAL_INVALID", 503);
-  return a;
+async function digestFile(path, executable = false) {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const before = await file.stat();
+    requireThat(before.isFile() && before.size <= (executable ? 268435456 : 131072)
+      && (!executable || (before.mode & 0o111) !== 0 && (before.mode & 0o022) === 0),
+    "PINNED_FILE_INVALID", 503);
+    const hash = createHash("sha256"), buffer = Buffer.alloc(65536);
+    let total = 0;
+    while (total <= before.size) {
+      const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, before.size - total + 1), null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      requireThat(total <= before.size, "PINNED_FILE_CHANGED", 503);
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+    const after = await file.stat();
+    requireThat(total === before.size && before.dev === after.dev && before.ino === after.ino
+      && before.size === after.size && before.mtimeMs === after.mtimeMs && before.ctimeMs === after.ctimeMs,
+    "PINNED_FILE_CHANGED", 503);
+    return hash.digest("hex");
+  } finally { await file.close(); }
 }
 
-async function verifyFiles(a) {
-  for (const file of RUNTIME_FILES) {
-    const path = join(ROOT, file); const s = await lstat(path);
-    requireThat(s.isFile() && !s.isSymbolicLink() && s.size <= 131072
-      && sha(await readFile(path)) === a.sourceHashes[file], "SOURCE_IDENTITY_CHANGED", 503);
+async function noLinkedParents(path, excludedDirectory) {
+  for (let parent = dirname(path); ; parent = dirname(parent)) {
+    const s = await lstat(parent);
+    requireThat(s.isDirectory() && !s.isSymbolicLink(), "LINKED_SESSION_PATH", 503);
+    requireThat(!excludedDirectory || s.dev !== excludedDirectory.dev || s.ino !== excludedDirectory.ino,
+      "KEY_MUST_BE_OUTSIDE_REPOSITORY", 503);
+    if (parent === dirname(parent)) return;
   }
-  requireThat(sha(await readFile(a.nodeExecutable)) === a.nodeSha256, "NODE_IDENTITY_CHANGED", 503);
-  requireThat(sha(await readFile(a.otaExecutable)) === a.otaSha256, "OTA_IDENTITY_CHANGED", 503);
+}
+
+function sessionLocation(root, file) {
+  requireThat(typeof file === "string" && isAbsolute(file), "APPROVAL_FILE_REQUIRED", 503);
+  const id = basename(dirname(file));
+  requireThat(validId(id) && file === join(root, "evidence/live", id, "approval.json"), "SESSION_PATH_INVALID", 503);
+  return { id, runDirectory: dirname(file) };
+}
+
+async function checkKeyMetadata(root, path) {
+  requireThat(typeof path === "string" && isAbsolute(path) && resolve(path) === path
+    && path !== root && !path.startsWith(root + "/"), "KEY_MUST_BE_OUTSIDE_REPOSITORY", 503);
+  try {
+    await noLinkedParents(path, await lstat(root));
+    const f = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const s = await f.stat();
+      requireThat(s.isFile() && s.uid === process.getuid() && (s.mode & 0o777) === 0o600
+        && s.nlink === 1 && s.size >= 16 && s.size <= 514, "PRIVATE_KEY_FILE_REQUIRED", 503);
+      // Preparation/startup validate metadata only. Only an explicit provider action reads the key bytes.
+    } finally { await f.close(); }
+  } catch (e) { if (e.code === "ENOENT") throw new Refusal("KEY_FILE_NOT_FOUND", 503); throw e; }
+}
+
+export async function verifyFiles(a, root = ROOT) {
+  for (const file of RUNTIME_FILES) {
+    requireThat(await digestFile(join(root, file)) === a.sourceHashes[file], "SOURCE_IDENTITY_CHANGED", 503);
+  }
+  requireThat(await digestFile(a.nodeExecutable, true) === a.nodeSha256, "NODE_IDENTITY_CHANGED", 503);
+  requireThat(await digestFile(a.otaExecutable, true) === a.otaSha256, "OTA_IDENTITY_CHANGED", 503);
+}
+
+export async function prepareSession({ root = ROOT, environment = process.env, now = Date.now,
+  nodeExecutable = process.execPath } = {}) {
+  root = await realpath(root);
+  const file = environment.META_DEMO_APPROVAL_FILE;
+  const { id, runDirectory } = sessionLocation(root, file);
+  const number = (name, max, code) => {
+    const raw = environment[name];
+    requireThat(typeof raw === "string" && /^[1-9][0-9]*$/.test(raw)
+      && integer(Number(raw), 1, max), code, 400);
+    return Number(raw);
+  };
+  const minutes = number("META_DEMO_SESSION_MINUTES", MAX_SESSION_MINUTES, "SESSION_MINUTES_INVALID");
+  const requestLimit = number("META_DEMO_REQUEST_LIMIT", MAX_SESSION_REQUESTS, "REQUEST_LIMIT_INVALID");
+  const keyFile = environment.META_DEMO_KEY_FILE;
+  await checkKeyMetadata(root, keyFile);
+  requireThat(typeof environment.META_DEMO_OTA_EXECUTABLE === "string"
+    && isAbsolute(environment.META_DEMO_OTA_EXECUTABLE), "OTA_EXECUTABLE_REQUIRED", 503);
+  nodeExecutable = await realpath(nodeExecutable);
+  const otaExecutable = await realpath(environment.META_DEMO_OTA_EXECUTABLE);
+  const sourceHashes = {};
+  for (const path of RUNTIME_FILES) sourceHashes[path] = await digestFile(join(root, path));
+  const nodeSha256 = await digestFile(nodeExecutable, true), otaSha256 = await digestFile(otaExecutable, true);
+  const issuedAt = new Date(now()).toISOString(), deadline = new Date(Date.parse(issuedAt) + minutes * 60000).toISOString();
+  const scope = { id, issuedAt, deadline, limit: requestLimit };
+  validateSessionWindow(scope, now());
+  const a = { version: 2, id, issuedAt, deadline, requestLimit, keyFile,
+    nodeExecutable, nodeSha256, otaExecutable, otaSha256, sourceHashes };
+  for (const parent of [join(root, "evidence"), join(root, "evidence/live")]) {
+    try { await mkdir(parent, { mode: 0o700 }); } catch (e) { if (e.code !== "EEXIST") throw e; }
+    await privateDirectory(parent);
+  }
+  await noLinkedParents(runDirectory);
+  try { await mkdir(runDirectory, { mode: 0o700 }); }
+  catch (e) { if (e.code === "EEXIST") throw new Refusal("SESSION_ALREADY_EXISTS", 409); throw e; }
+  await syncDirectory(dirname(runDirectory));
+  // The approval is published last. An interrupted preparation remains an unadoptable partial scope.
+  await initializeBudget(join(runDirectory, "budget.json"), scope);
+  await exclusiveJSON(file, a);
+  return { approvalFile: file, id, issuedAt, deadline, requestLimit };
+}
+
+export async function loadOwnerSession({ root = ROOT, approvalFile = process.env.META_DEMO_APPROVAL_FILE,
+  now = Date.now } = {}) {
+  root = await realpath(root);
+  const location = sessionLocation(root, approvalFile);
+  let a;
+  try {
+    await noLinkedParents(approvalFile); await privateDirectory(location.runDirectory);
+    a = JSON.parse((await readPrivate(approvalFile)).toString("utf8"));
+  }
+  catch (e) {
+    if (e.code === "ENOENT") throw new Refusal("SESSION_NOT_PREPARED", 503);
+    if (e instanceof SyntaxError) throw new Refusal("APPROVAL_INVALID", 503);
+    throw e;
+  }
+  requireThat(a?.version !== 1, "LEGACY_SESSION_READ_ONLY", 503);
+  requireThat(exact(a, ["version", "id", "issuedAt", "deadline", "requestLimit", "keyFile", "nodeExecutable",
+    "nodeSha256", "otaExecutable", "otaSha256", "sourceHashes"])
+    && a.version === 2 && a.id === location.id && isAbsolute(a.nodeExecutable ?? "")
+    && isAbsolute(a.otaExecutable ?? "") && HASH.test(a.nodeSha256) && HASH.test(a.otaSha256)
+    && exact(a.sourceHashes, RUNTIME_FILES) && Object.values(a.sourceHashes).every((x) => HASH.test(x)),
+  "APPROVAL_INVALID", 503);
+  const scope = { id: a.id, issuedAt: a.issuedAt, deadline: a.deadline, limit: a.requestLimit };
+  validateSessionWindow(scope, now());
+  await verifyFiles(a, root); await checkKeyMetadata(root, a.keyFile);
+  const ledger = new BudgetLedger(join(location.runDirectory, "budget.json"), scope, { now });
+  let budget;
+  try { budget = await ledger.ready(); }
+  catch (e) { if (e.code === "ENOENT") throw new Refusal("SESSION_INCOMPLETE", 503); throw e; }
+  requireThat(budget.reservations.length < budget.limit, "REQUEST_BUDGET_EXHAUSTED", 403);
+  validateSessionWindow(scope, now());
+  return { approval: a, scope, ledger, runDirectory: location.runDirectory };
+}
+
+export function startupHint(code) {
+  const hints = {
+    APPROVAL_FILE_REQUIRED: "Set META_DEMO_APPROVAL_FILE to the new recording approval.json path shown in README.md.",
+    SESSION_PATH_INVALID: "Use <checkout>/evidence/live/<new-session-name>/approval.json.",
+    SESSION_MINUTES_INVALID: "Set META_DEMO_SESSION_MINUTES to an integer from 1 to 60.",
+    REQUEST_LIMIT_INVALID: "Set META_DEMO_REQUEST_LIMIT to an integer from 1 to 6 for this session.",
+    KEY_FILE_NOT_FOUND: "Create your private key file outside this checkout; set META_DEMO_KEY_FILE during preparation.",
+    PRIVATE_KEY_FILE_REQUIRED: "The key file must be a single owner-owned regular file with mode 0600, outside the checkout.",
+    KEY_MUST_BE_OUTSIDE_REPOSITORY: "Set META_DEMO_KEY_FILE to an absolute private key path outside the checkout.",
+    OTA_EXECUTABLE_REQUIRED: "Set META_DEMO_OTA_EXECUTABLE to your qualified released Ota executable's absolute path.",
+    SESSION_ALREADY_EXISTS: "This scope already exists. Never reset it; explicitly prepare a different new session path.",
+    SESSION_NOT_PREPARED: "Run ota run demo:live:budget --agent with the setup inputs in README.md before starting.",
+    SESSION_INCOMPLETE: "Preparation is incomplete; no automatic repair or budget reset. Review the retained partial scope.",
+    LEGACY_SESSION_READ_ONLY: "Historical V1 approvals/budgets cannot be renewed or imported. Prepare an explicit new V2 session.",
+    SESSION_WINDOW_EXPIRED_OR_FUTURE: "This session is outside its recorded window. It cannot be extended in place.",
+    REQUEST_BUDGET_EXHAUSTED: "This session has no requests left. It cannot be topped up or silently replaced.",
+  };
+  return hints[code] ?? "Review the configuration and retained state; no automatic retry or reset. See README.md.";
 }
 
 async function start() {
-  const a = await approval(); await verifyFiles(a);
-  const runDirectory = join(ROOT, "evidence/live", a.id);
-  await privateDirectory(runDirectory);
-  const scope = { id: a.id, deadline: a.deadline, limit: 6 };
-  const ledgerFile = join(runDirectory, "budget.json");
   if (process.argv.length === 3 && process.argv[2] === "--initialize-budget") {
-    await initializeBudget(ledgerFile, scope); console.log("BUDGET_INITIALIZED_NO_SERVICE_NO_PROVIDER"); return;
+    const session = await prepareSession();
+    console.log(JSON.stringify({ status: "SESSION_PREPARED_NO_SERVICE_NO_PROVIDER", ...session })); return;
   }
   requireThat(process.argv.length === 2, "ARGUMENTS_REFUSED");
-  const ledger = new BudgetLedger(ledgerFile, scope); await ledger.ready();
+  const { approval: a, scope, ledger, runDirectory } = await loadOwnerSession();
   const lifecycle = createLifecycle({ deadline: Date.parse(a.deadline) });
   const rule = JSON.parse(await readFile(join(ROOT, "pricing/rule.json"), "utf8"));
   requireThat(exact(rule, ["id", "title", "text", "domain"]) && rule.id === "pricing-v1", "RULE_INVALID", 503);
@@ -1036,23 +1195,20 @@ async function start() {
       originalSha256: sha(originalSource), candidateSha256: sha(candidateSource),
       diff: "ORIGINAL\n" + originalSource + "\nPROPOSED\n" + candidateSource });
   }
-  const verification = createPricingVerification({ root: ROOT, runDirectory, sourceHashes: a.sourceHashes,
+  const verification = createPricingVerification({ root: ROOT, runDirectory, scopeId: a.id, sourceHashes: a.sourceHashes,
     lifecycle, verifySources: () => verifyFiles(a),
     execute: (task, cwd) => runDeclaredVerification({ task, cwd, nodeExecutable: a.nodeExecutable,
       otaExecutable: a.otaExecutable, lifecycle }) });
   const sources = { rule: a.sourceHashes["pricing/rule.json"], original: a.sourceHashes["pricing/original.ts"],
     candidate: a.sourceHashes["pricing/change-a.ts"], control: a.sourceHashes["pricing/change-b.ts"] };
-  const retainedCheckpoint = a.retainedCheckpoint ? await loadRetainedCheckpoint(a.retainedCheckpoint,
-    { scopeId: a.id, change: changes[0], sources }) : undefined;
-  const controller = createController({ changes, scope, ledger, lifecycle, baselineCoverage, retainedCheckpoint,
+  const controller = createController({ changes, scope, ledger, lifecycle, baselineCoverage,
     ruleIdentity: sources.rule, controlIdentity: sources.control, feedbackAttempts: createFeedbackAttempts(runDirectory),
     baselineIdentity: a.sourceHashes["pricing/baseline.json"], verification,
     verifySources: () => verifyFiles(a),
     provider: (packet) => museProposal(a.keyFile, packet, a.deadline, { lifecycle }),
     feedbackProvider: (packet) => museFeedback(a.keyFile, packet, a.deadline, { lifecycle }),
     runner: (id, cases) => fixedRunner(a.nodeExecutable, id, cases, lifecycle),
-    persistExport: (source) => persistRegression({ artifact: join(ROOT, "evidence/regression.test.mjs"),
-      record: join(runDirectory, "current-export.json"), scopeId: a.id, source }),
+    persistExport: (source, binding) => persistRegression({ root: ROOT, runDirectory, scopeId: a.id, source, ...binding }),
     retain: (name, data) => exclusiveJSON(join(runDirectory, name + ".json"), data) });
   const security = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" };
@@ -1114,5 +1270,8 @@ async function start() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  start().catch((error) => { console.error(error instanceof Refusal ? error.code : "STARTUP_REFUSED"); process.exitCode = 1; });
+  start().catch((error) => {
+    const code = error instanceof Refusal ? error.code : "STARTUP_REFUSED";
+    console.error(code + ": " + startupHint(code)); process.exitCode = 1;
+  });
 }

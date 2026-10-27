@@ -8,13 +8,16 @@ import { EventEmitter } from "node:events";
 import { BudgetLedger, initializeBudget, persistRegression, createController, checkRequest,
   buildRunnerEnvironment, exportRegression, ruleTotal, createLifecycle, museProposal, closeProviderRequests,
   feedbackContext, feedbackFromResponse, validateRetainedCheckpoint, loadRetainedCheckpoint,
-  createFeedbackAttempts, museFeedback, ORIGIN } from "../tools/live-demo.mjs";
+  createFeedbackAttempts, museFeedback, prepareSession, loadOwnerSession,
+  validateSessionWindow, startupHint, exportArtifactPath, RUNTIME_FILES, ORIGIN } from "../tools/live-demo.mjs";
 
 // All providers/runners/reviewer decisions in this file are synthetic offline fixtures.
 const TEMP = fileURLToPath(new URL("../evidence/live-tests/", import.meta.url));
 const NOW = Date.parse("2026-10-27T00:00:00.000Z");
-const scope = { id: "fixture-scope", deadline: "2026-10-27T03:50:52.000Z", limit: 6 };
+const scope = { id: "fixture-scope", issuedAt: "2026-10-27T00:00:00.000Z",
+  deadline: "2026-10-27T00:20:00.000Z", limit: 6 };
 const sha = (value) => createHash("sha256").update(value).digest("hex");
+const EXPORT_ID = "11111111-1111-4111-8111-111111111111";
 async function owned(fn) {
   await mkdir(TEMP, { recursive: true, mode: 0o700 });
   const root = await mkdtemp(join(TEMP, "unit-"));
@@ -157,7 +160,9 @@ async function fixture(overrides = {}, { prepareBaseline = true } = {}) {
   runner: async (id, baskets) => { calls.runner++; return { rows: baskets.map((lines) => ({ original: { value: ruleTotal(lines), error: null },
     candidate: { value: id === "b" ? ruleTotal(lines) : 8550, error: null } })) }; },
   verifySources: async () => {}, retain: async (name, value) => calls.retained.push({ name, value }),
-  persistExport: async (source) => { calls.exports.push(source); return { sha256: sha(source) }; },
+  persistExport: async (source, { exportId }) => {
+    calls.exports.push(source); return { sha256: sha(source), exportId, path: exportArtifactPath(scope.id, exportId) };
+  },
   ...overrides });
   if (prepareBaseline) {
     // Explicit synthetic baseline setup; model/runner counts remain independent.
@@ -202,19 +207,21 @@ test("a real passing baseline is required before any model reservation", async (
 
 test("same-test regression requires a reproduced export and never accepts caller paths or code", async () => {
   const f = await fixture();
-  await assert.rejects(() => f.controller.action("/api/regression", { runId: "unknown", requestId: "early-regression" }), /REPRODUCED_EXPORT_REQUIRED/);
+  await assert.rejects(() => f.controller.action("/api/regression", { runId: "unknown", exportId: EXPORT_ID, requestId: "early-regression" }), /REPRODUCED_EXPORT_REQUIRED/);
   const { result } = await accepted(f.controller);
   const run = await f.controller.action("/api/compare", { acceptedId: result.acceptedId, requestId: "request-compare" });
-  await assert.rejects(() => f.controller.action("/api/regression", { runId: run.runId, requestId: "no-export" }), /REPRODUCED_EXPORT_REQUIRED/);
+  await assert.rejects(() => f.controller.action("/api/regression", { runId: run.runId, exportId: EXPORT_ID, requestId: "no-export" }), /REPRODUCED_EXPORT_REQUIRED/);
   const exported = await f.controller.action("/api/export", { runId: run.runId, requestId: "request-export" });
   await assert.rejects(() => f.controller.action("/api/regression", { runId: run.runId, requestId: "path-injection", path: "elsewhere" }), /INVALID_FIELDS/);
-  const proof = await f.controller.action("/api/regression", { runId: run.runId, requestId: "request-regression" });
+  await assert.rejects(() => f.controller.action("/api/export", { runId: run.runId, requestId: "repeat-export" }), /RUN_ALREADY_EXPORTED/);
+  await assert.rejects(() => f.controller.action("/api/regression", { runId: run.runId, exportId: EXPORT_ID, requestId: "cross-export" }), /REPRODUCED_EXPORT_REQUIRED/);
+  const proof = await f.controller.action("/api/regression", { runId: run.runId, exportId: exported.exportId, requestId: "request-regression" });
   assert.equal(proof.status, "RED_THEN_GREEN"); assert.equal(proof.origin, "LOCAL_EXECUTION");
   assert.equal(proof.testSha256, exported.sha256);
   assert.equal(f.calls.regressions[0].testSource, exported.testSource);
   assert.equal(f.calls.regressions[0].expectedTests, 1); assert.equal(f.calls.regressions[0].expectedFailures, 1);
   assert.equal(f.calls.provider, 1, "red-green does not make a second model request");
-  await assert.rejects(() => f.controller.action("/api/regression", { runId: run.runId, requestId: "repeat-regression" }), /REGRESSION_ALREADY_RUN/);
+  await assert.rejects(() => f.controller.action("/api/regression", { runId: run.runId, exportId: exported.exportId, requestId: "repeat-regression" }), /REGRESSION_ALREADY_RUN/);
 });
 
 test("source-derived rule check rejects unchecked or wrong expectations; corrections are REVIEWER not human identity", async () => {
@@ -319,17 +326,34 @@ test("runner environment is an explicit allowlist and export uses data, not mode
   assert.throws(() => exportRegression("a", [{ lines: [{ amount: '1;bad()', discountEligible: true }], expectedTotal: 0 }]));
 });
 
-test("export atomically persists exact runnable bytes, preserves private mode, rejects unowned/changed preimages", async () => {
+test("exports are private append-only session artifacts and never overwrite legacy or earlier exports", async () => {
   await owned(async (root) => {
-    const artifact = join(root, "regression.test.mjs"), record = join(root, "owned.json");
-    const input = { artifact, record, scopeId: scope.id, source: "// fixed synthetic test\n" };
+    const runDirectory = join(root, "evidence/live", scope.id);
+    await mkdir(runDirectory, { recursive: true, mode: 0o700 });
+    const legacy = join(root, "evidence/regression.test.mjs");
+    await writeFile(legacy, "// legacy unchanged\n", { mode: 0o600 });
+    const input = { root, runDirectory, scopeId: scope.id, runId: "run-first", scenarioId: "a",
+      exportId: EXPORT_ID, source: "// fixed synthetic test\n" };
     const first = await persistRegression(input);
+    const artifact = join(root, first.path);
     assert.equal(await readFile(artifact, "utf8"), input.source);
     assert.equal(first.sha256, sha(input.source)); assert.equal((await lstat(artifact)).mode & 0o777, 0o600);
-    const second = await persistRegression({ ...input, source: "// another fixed synthetic test\n" });
-    assert.equal(second.sha256, sha(await readFile(artifact)));
-    await writeFile(artifact, "external change");
-    await assert.rejects(() => persistRegression(input), /EXPORT_PREIMAGE_CHANGED/);
+    assert.equal((await lstat(join(artifact, ".."))).mode & 0o777, 0o700);
+    assert.deepEqual(JSON.parse(await readFile(join(artifact, "../record.json"))),
+      { version: 2, scopeId: scope.id, runId: "run-first", scenarioId: "a", exportId: EXPORT_ID, sha256: first.sha256 });
+    const second = await persistRegression({ ...input, exportId: "22222222-2222-4222-8222-222222222222",
+      runId: "run-second", source: "// another fixed synthetic test\n" });
+    assert.notEqual(first.path, second.path);
+    assert.equal(second.sha256, sha(await readFile(join(root, second.path))));
+    await assert.rejects(() => persistRegression(input), /EEXIST/);
+    assert.equal(await readFile(artifact, "utf8"), input.source);
+    assert.equal(await readFile(legacy, "utf8"), "// legacy unchanged\n");
+    const laterScope = "later-fixture-scope", laterDirectory = join(root, "evidence/live", laterScope);
+    await mkdir(laterDirectory, { mode: 0o700 });
+    const later = await persistRegression({ ...input, scopeId: laterScope, runDirectory: laterDirectory });
+    assert.notEqual(later.path, first.path);
+    assert.equal(await readFile(artifact, "utf8"), input.source);
+    assert.throws(() => exportArtifactPath(scope.id, "../escape"), /EXPORT_ID_INVALID/);
   });
 });
 
@@ -339,10 +363,16 @@ test("export persistence failure returns no successful command or missing-artifa
   const run = await f.controller.action("/api/compare", { acceptedId: result.acceptedId, requestId: "request-compare" });
   await assert.rejects(() => f.controller.action("/api/export", { runId: run.runId, requestId: "request-export" }), /synthetic disk/);
   await owned(async (root) => {
-    const artifact = join(root, "regression.test.mjs"), record = join(root, "owned.json");
-    await assert.rejects(() => persistRegression({ artifact, record, scopeId: scope.id, source: "// test\n",
+    const runDirectory = join(root, "evidence/live", scope.id);
+    await mkdir(runDirectory, { recursive: true, mode: 0o700 });
+    const input = { root, runDirectory, scopeId: scope.id, runId: "interrupted-run", scenarioId: "a",
+      exportId: EXPORT_ID, source: "// test\n" };
+    await assert.rejects(() => persistRegression({ ...input,
       beforeCommit: () => { throw new Error("synthetic interrupted export"); } }), /synthetic/);
-    await assert.rejects(() => lstat(artifact), /ENOENT/);
+    const artifact = join(root, exportArtifactPath(scope.id, EXPORT_ID));
+    assert.equal(await readFile(artifact, "utf8"), input.source);
+    await assert.rejects(() => lstat(join(artifact, "../record.json")), /ENOENT/);
+    await assert.rejects(() => persistRegression(input), /EEXIST/);
   });
 });
 
@@ -685,7 +715,7 @@ test("retained-root export and regression append fresh request records without c
     const f = await fixture({ retainedCheckpoint: checkpoint,
       retain: async (name, data) => writeFile(join(root, name + ".json"), JSON.stringify(data), { mode: 0o600, flag: "wx" }) });
     const exported = await f.controller.action("/api/export", { runId, requestId: "fresh-retained-export" });
-    const proof = await f.controller.action("/api/regression", { runId, requestId: "fresh-retained-regression" });
+    const proof = await f.controller.action("/api/regression", { runId, exportId: exported.exportId, requestId: "fresh-retained-regression" });
     assert.equal(proof.status, "RED_THEN_GREEN"); assert.equal(proof.testSha256, exported.sha256);
     for (const name of oldNames) assert.equal(await readFile(join(root, name + ".json"), "utf8"), "historical proof\n");
     assert.equal(JSON.parse(await readFile(join(root, "export-" + runId + "-fresh-retained-export.json"))).sha256, exported.sha256);
@@ -712,6 +742,160 @@ test("feedback provider reuses the fixed model/4096 cap, closed schema and redac
   assert.equal(body.store, false); assert.equal(body.stream, false); assert.deepEqual(body.tools, []);
   assert.equal(body.text.format.name, "pricing_feedback"); assert.equal(body.text.format.schema.additionalProperties, false);
   assert.equal(raw.echo, "[REDACTED]"); assert.ok(key.every((x) => x === 0));
+});
+
+async function sessionFixture(operation) {
+  await owned(async (parent) => {
+    const root = join(parent, "checkout"); await mkdir(root, { mode: 0o700 });
+    for (const name of RUNTIME_FILES) {
+      await mkdir(join(root, name, ".."), { recursive: true, mode: 0o700 });
+      await writeFile(join(root, name), "synthetic source: " + name, { mode: 0o600 });
+    }
+    const key = join(parent, "fake-key"), node = join(parent, "fake-node"), ota = join(parent, "fake-ota");
+    await writeFile(key, "fake-only-not-a-real-credential", { mode: 0o600 });
+    await writeFile(node, "synthetic never-executed node", { mode: 0o700 });
+    await writeFile(ota, "synthetic never-executed ota", { mode: 0o700 });
+    const environment = { META_DEMO_APPROVAL_FILE: join(root, "evidence/live/recording-fixture/approval.json"),
+      META_DEMO_KEY_FILE: key, META_DEMO_OTA_EXECUTABLE: ota,
+      META_DEMO_SESSION_MINUTES: "20", META_DEMO_REQUEST_LIMIT: "2" };
+    const prepare = () => prepareSession({ root, environment, nodeExecutable: node, now: () => NOW });
+    const load = (now = NOW) => loadOwnerSession({ root, approvalFile: environment.META_DEMO_APPROVAL_FILE, now: () => now });
+    await operation({ root, environment, key, node, ota, prepare, load });
+    assert.equal(await readFile(key, "utf8"), "fake-only-not-a-real-credential");
+  });
+}
+
+test("fresh explicit session preparation auto-pins sources/binaries, creates a private V2 pair and does not run anything", async () => {
+  await sessionFixture(async ({ environment, node, ota, prepare, load }) => {
+    const before = JSON.stringify(environment);
+    const result = await prepare();
+    assert.equal(result.requestLimit, 2); assert.equal(result.deadline, scope.deadline);
+    const { approval, ledger, scope: actualScope } = await load();
+    assert.equal(approval.version, 2); assert.equal(approval.requestLimit, 2);
+    assert.equal(approval.nodeSha256, sha(await readFile(node))); assert.equal(approval.otaSha256, sha(await readFile(ota)));
+    assert.deepEqual(Object.keys(approval.sourceHashes), RUNTIME_FILES);
+    assert.equal((await lstat(environment.META_DEMO_APPROVAL_FILE)).mode & 0o777, 0o600);
+    assert.equal((await lstat(join(environment.META_DEMO_APPROVAL_FILE, ".."))).mode & 0o777, 0o700);
+    assert.equal((await ledger.ready()).version, 2); assert.equal((await ledger.ready()).reservations.length, 0);
+    assert.equal(actualScope.limit, 2); assert.equal(JSON.stringify(environment), before);
+    await ledger.reserve("fresh-request-1");
+    const restarted = await load(); assert.equal((await restarted.ledger.ready()).reservations.length, 1);
+    await restarted.ledger.reserve("fresh-request-2");
+    await assert.rejects(load, /REQUEST_BUDGET_EXHAUSTED/);
+    await assert.rejects(prepare, /SESSION_ALREADY_EXISTS/);
+    assert.equal((await restarted.ledger.ready()).reservations.length, 2);
+  });
+});
+
+test("session preparation rejects missing/malformed inputs before writing approval or budget", async () => {
+  const changes = [
+    ["META_DEMO_APPROVAL_FILE", undefined], ["META_DEMO_APPROVAL_FILE", "/tmp/arbitrary-approval.json"],
+    ["META_DEMO_SESSION_MINUTES", undefined], ["META_DEMO_SESSION_MINUTES", "0"], ["META_DEMO_SESSION_MINUTES", "61"],
+    ["META_DEMO_SESSION_MINUTES", "1.5"], ["META_DEMO_REQUEST_LIMIT", "0"], ["META_DEMO_REQUEST_LIMIT", "7"],
+    ["META_DEMO_REQUEST_LIMIT", " 2"], ["META_DEMO_KEY_FILE", undefined], ["META_DEMO_OTA_EXECUTABLE", undefined],
+  ];
+  for (const [name, value] of changes) {
+    await sessionFixture(async ({ root, environment, prepare }) => {
+      environment[name] = value;
+      await assert.rejects(prepare);
+      await assert.rejects(() => lstat(join(root, "evidence")), /ENOENT/);
+    });
+  }
+});
+
+test("bounded windows reject expired, future, reversed, oversized or unbounded records", () => {
+  validateSessionWindow(scope, NOW);
+  for (const change of [{ limit: 0 }, { limit: 7 }, { deadline: scope.issuedAt },
+    { deadline: new Date(NOW + 61 * 60000).toISOString() }, { issuedAt: "not-a-date" },
+    { deadline: "9999-01-01T00:00:00.000Z" }]) assert.throws(() => validateSessionWindow({ ...scope, ...change }, NOW));
+  assert.throws(() => validateSessionWindow(scope, NOW - 1), /SESSION_WINDOW_EXPIRED_OR_FUTURE/);
+  assert.throws(() => validateSessionWindow(scope, Date.parse(scope.deadline)), /SESSION_WINDOW_EXPIRED_OR_FUTURE/);
+});
+
+test("startup refuses missing/malformed/expired or partial established configuration without repairing it", async () => {
+  await sessionFixture(async ({ environment, prepare, load }) => {
+    await assert.rejects(load, /SESSION_NOT_PREPARED/);
+    await prepare();
+    await assert.rejects(() => load(NOW - 1), /SESSION_WINDOW_EXPIRED_OR_FUTURE/);
+    await assert.rejects(() => load(Date.parse(scope.deadline)), /SESSION_WINDOW_EXPIRED_OR_FUTURE/);
+    const file = environment.META_DEMO_APPROVAL_FILE, before = await readFile(file);
+    await writeFile(file, "{"); await assert.rejects(load, /APPROVAL_INVALID/); await writeFile(file, before);
+    const budget = join(file, "../budget.json"), old = await readFile(budget);
+    await rm(budget); await assert.rejects(load, /SESSION_INCOMPLETE/);
+    await assert.rejects(prepare, /SESSION_ALREADY_EXISTS/);
+    await assert.rejects(() => lstat(budget), /ENOENT/);
+    await writeFile(budget, old, { mode: 0o600 });
+    const loaded = await load(); assert.equal((await loaded.ledger.ready()).reservations.length, 0);
+  });
+});
+
+test("source/binary/private-key metadata mismatches refuse before a session can be used", async () => {
+  for (const target of ["source", "node", "ota", "keymode", "keyinside", "linked-key"]) {
+    await sessionFixture(async ({ root, environment, key, node, ota, prepare, load }) => {
+      if (target === "keyinside") {
+        environment.META_DEMO_KEY_FILE = join(root, "private-key");
+        await writeFile(environment.META_DEMO_KEY_FILE, "fake-only-not-a-real-credential", { mode: 0o600 });
+        await assert.rejects(prepare, /KEY_MUST_BE_OUTSIDE_REPOSITORY/); return;
+      }
+      if (target === "linked-key") {
+        environment.META_DEMO_KEY_FILE = key + "-link"; await symlink(key, environment.META_DEMO_KEY_FILE);
+        await assert.rejects(prepare); return;
+      }
+      await prepare();
+      if (target === "source") await writeFile(join(root, "pricing/original.ts"), "tampered source");
+      if (target === "node") await writeFile(node, "tampered executable");
+      if (target === "ota") await writeFile(ota, "tampered executable");
+      if (target === "keymode") await chmod(key, 0o644);
+      await assert.rejects(load);
+    });
+  }
+});
+
+test("a case-insensitive filesystem alias cannot put the private key inside the checkout", async (t) => {
+  await sessionFixture(async ({ root, environment, prepare }) => {
+    const alias = join(root, "../CHECKOUT");
+    let actual;
+    try { actual = await lstat(alias); } catch (e) { if (e.code === "ENOENT") { t.skip("case-sensitive filesystem"); return; } throw e; }
+    const expected = await lstat(root);
+    assert.equal(actual.dev, expected.dev); assert.equal(actual.ino, expected.ino);
+    await writeFile(join(root, "alias-fake-key"), "fake-only-not-a-real-credential", { mode: 0o600 });
+    environment.META_DEMO_KEY_FILE = join(alias, "alias-fake-key");
+    await assert.rejects(prepare, /KEY_MUST_BE_OUTSIDE_REPOSITORY/);
+    await assert.rejects(() => lstat(join(root, "evidence")), /ENOENT/);
+  });
+});
+
+test("historical V1 or exhausted ledgers cannot become fresh sessions or gain lock-side effects", async () => {
+  await sessionFixture(async ({ environment, prepare, load }) => {
+    await prepare();
+    const file = environment.META_DEMO_APPROVAL_FILE, originalApproval = await readFile(file);
+    const path = join(file, "../budget.json");
+    const oldBudget = JSON.stringify({ version: 1, scopeId: "recording-fixture", deadline: scope.deadline,
+      limit: 6, reservations: Array.from({ length: 6 }, (_, i) => ({ requestId: "historical-" + i, reservedAt: scope.issuedAt })) });
+    await writeFile(path, oldBudget);
+    await assert.rejects(load, /LEGACY_SESSION_READ_ONLY/);
+    const ledger = new BudgetLedger(path, { ...scope, id: "recording-fixture", limit: 2 }, { now: () => NOW });
+    await assert.rejects(() => ledger.reserve("must-not-dispatch"), /LEGACY_SESSION_READ_ONLY/);
+    await assert.rejects(() => lstat(path + ".lock"), /ENOENT/);
+    await assert.rejects(prepare, /SESSION_ALREADY_EXISTS/);
+    assert.equal(await readFile(path, "utf8"), oldBudget);
+    await writeFile(file, JSON.stringify({ version: 1 }));
+    await assert.rejects(load, /LEGACY_SESSION_READ_ONLY/);
+    assert.equal(await readFile(path, "utf8"), oldBudget);
+    await writeFile(file, originalApproval);
+  });
+});
+
+test("setup errors give actionable public configuration guidance, not a hidden hash checklist", () => {
+  assert.match(startupHint("SESSION_NOT_PREPARED"), /ota run demo:live:budget --agent/);
+  assert.match(startupHint("SESSION_MINUTES_INVALID"), /1 to 60/);
+  assert.match(startupHint("REQUEST_LIMIT_INVALID"), /1 to 6/);
+  assert.match(startupHint("LEGACY_SESSION_READ_ONLY"), /cannot be renewed or imported/);
+});
+
+test("controller session reports the actual configured request cap", async () => {
+  const f = await fixture({ scope: { ...scope, limit: 1 } });
+  assert.equal((await f.controller.session()).limit, 1);
 });
 
 // Explicit optional owner evidence input, never part of ordinary fixture proof or service startup.
