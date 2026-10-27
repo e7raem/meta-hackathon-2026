@@ -3,7 +3,8 @@
 **Catch checkout regressions that green baseline tests miss, then keep a test
 that fails on the faulty code and passes on the reviewed correction.**
 
-**Video:** [Watch the 2:24 demo](https://raw.githubusercontent.com/ota-run/meta-hackathon-2026/main/demo/break-this-pr.mp4)
+**Video:** [Watch the 2:24 demo](https://ota-run.github.io/meta-hackathon-2026/)
+| [Download the MP4](https://raw.githubusercontent.com/ota-run/meta-hackathon-2026/main/demo/break-this-pr.mp4)
 
 This is one prepared checkout-refactor example, not a real customer's PR or a
 hosted application. The video is the judge entry point; the selected offline
