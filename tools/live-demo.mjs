@@ -211,7 +211,10 @@ export function buildRunnerEnvironment(node) {
 }
 
 export function checkRequest(method, path, headers, nonce) {
-  requireThat(headers.host === "127.0.0.1:48761", "HOST_REFUSED", 403);
+  // Temporary compatibility with released Ota 1.6.28's portless readiness Host.
+  const readinessProbe = method === "GET" && path === "/health";
+  requireThat(headers.host === "127.0.0.1:48761"
+    || (readinessProbe && headers.host === "127.0.0.1"), "HOST_REFUSED", 403);
   if (method === "GET") {
     requireThat(["/", "/app.js", "/styles.css", "/health", "/api/session"].includes(path), "NOT_FOUND", 404);
     return;

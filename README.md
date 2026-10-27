@@ -52,6 +52,15 @@ not a malicious local same-user process. Reviewer acceptance/correction is an
 operator declaration, not verified human identity. Ota effects are declarations,
 not a claim of universal network/process containment.
 
+Temporary readiness compatibility: released Ota v1.6.28 sends a portless HTTP
+`Host` in its socket readiness probe. Only **GET `/health`** therefore accepts
+the literal `127.0.0.1` as well as `127.0.0.1:48761`. Static/session/POST routes
+retain the exact-port Host requirement; readiness is not skipped or changed to
+TCP. Named Ota gap: HTTP readiness authority omits a non-default port. Core owns
+the permanent authority-serialization fix and IPv6/non-default-port regressions;
+return to it in the next Core work slice, outside this demo's implementation.
+This temporary compatibility does not establish a repaired Ota release.
+
 Successful export persists `evidence/regression.test.mjs`, returns its hash and
 `ota run verify:export --agent`. Check that hash before executing; the optional
 download is only a copy. The test uses a fixed audited template and numeric/

@@ -99,6 +99,22 @@ test("Host, Origin, nonce, type, method and closed routes are mandatory", () => 
   assert.throws(() => checkRequest("PUT", "/api/propose", good, "fixture-nonce"));
 });
 
+test("released Ota's bare loopback Host is accepted only for GET /health", () => {
+  const bare = { host: "127.0.0.1", origin: ORIGIN,
+    "x-demo-token": "fixture-nonce", "content-type": "application/json" };
+  checkRequest("GET", "/health", bare, "fixture-nonce");
+  checkRequest("GET", "/health", { host: "127.0.0.1:48761" }, "fixture-nonce");
+  for (const path of ["/", "/app.js", "/styles.css", "/api/session", "/health?extra=1"]) {
+    assert.throws(() => checkRequest("GET", path, bare, "fixture-nonce"), /HOST_REFUSED/);
+  }
+  for (const path of ["/api/propose", "/api/accept", "/api/compare", "/api/export", "/health"]) {
+    assert.throws(() => checkRequest("POST", path, bare, "fixture-nonce"), /HOST_REFUSED/);
+  }
+  for (const host of [undefined, "localhost", "localhost:48761", "evil.invalid", "127.0.0.1:80", "127.0.0.1.evil.invalid"]) {
+    assert.throws(() => checkRequest("GET", "/health", { host }, "fixture-nonce"), /HOST_REFUSED/);
+  }
+});
+
 function fixture(overrides = {}) {
   const lines = [{ amount: 10000, discountEligible: true }];
   const calls = { provider: 0, runner: 0, reservations: 0, exports: [], retained: [] };
