@@ -3,7 +3,7 @@
 **Catch checkout regressions that green baseline tests miss, then keep a test
 that fails on the faulty code and passes on the reviewed correction.**
 
-**Video:** [Watch the 2:48 demo](VIDEO_URL_PENDING)
+**Video:** [Watch the 2:24 demo](https://raw.githubusercontent.com/ota-run/meta-hackathon-2026/main/demo/break-this-pr.mp4)
 
 This is one prepared checkout-refactor example, not a real customer's PR or a
 hosted application. The video is the judge entry point; the selected offline
@@ -38,7 +38,7 @@ same-test red2/green2 proof. Muse explained the threshold/order fault and chose
 **STOP with zero new cases**. Live follow-up-case generation/execution was not
 demonstrated; that branch has offline fixture coverage only.
 
-MUSE's reconciliation and VLAD's independent review found no material issues in
+Separate engineering-agent source/evidence review found no material issues in
 this bounded result: thirteen runtime pins matched, the prior five reservations
 were preserved, request six was recorded, and owned verification directories were
 absent. B's selected-case agreement is not general correctness or a measured
@@ -92,7 +92,7 @@ export and intentionally fails on faulty code; a fresh clone does not contain on
 
 ## Demo Limits
 
-The 2:48 video uses twelve actual browser-state shots with edited cuts/holds and
+The 2:24 video uses actual browser-state shots with edited cuts/holds and
 shortened waiting, English subtitles and synthetic Daniel English UK narration
 **not Bobai's voice**. It is not continuous full-motion capture; the raw browser
 capture lasted 135.915 seconds. No whole-PR approval, production payment assurance,
