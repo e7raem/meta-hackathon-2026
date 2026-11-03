@@ -2,10 +2,12 @@
 
 **Find checkout bugs your passing tests missed.**
 
-Break This PR helps developers review a checkout refactor beyond its existing
-tests. Meta's **Muse Spark 1.3** suggests missing shopping baskets; a fixed runner
-checks the results against the pricing rule. The developer gets a reproducible
-failure and a regression test to keep, not just another review comment.
+Break This PR helps developers catch incorrect charges before merging a checkout
+refactor, even when its existing tests pass. Meta's **Muse Spark 1.3** finds missing
+shopping baskets from the pricing rule and code change. A developer checks the
+expected totals, then a fixed runner reproduces the defect. The result is a
+regression test that fails on the faulty code and passes on a reviewed correction,
+not just another review comment.
 
 ## The Problem
 
@@ -13,14 +15,15 @@ A pricing change can pass its tests and still charge customers the wrong amount.
 The tests may cover ordinary purchases but miss the interaction between a
 discount and a voucher threshold.
 
-In this prepared example, both the original code and the proposed refactor pass
-the same three baseline cases: **six passing assertions**. Muse suggested two
-additional baskets that exposed what those checks missed:
+In prepared change A, both the original code and the proposed refactor pass the
+same three baseline cases: **six passing assertions**. In the verified live run
+on 28 October, Muse proposed three new baskets that exposed what those checks missed:
 
-| Eligible items | Correct charge | Proposed code | What goes wrong |
+| Basket | Correct charge | Proposed code | What goes wrong |
 | --- | ---: | ---: | --- |
-| GBP100 | GBP90 | GBP85.50 | Shop undercharges GBP4.50 |
-| GBP200 | GBP175 | GBP175.50 | Customer overcharged GBP0.50 |
+| GBP110 eligible | GBP99 | GBP94.50 | Shop undercharges GBP4.50 |
+| GBP200 eligible | GBP175 | GBP175.50 | Customer overcharged GBP0.50 |
+| GBP150 eligible + GBP50 full-price | GBP180 | GBP180.50 | Customer overcharged GBP0.50 |
 
 The [shop rule](pricing/rule.json) is simple: take 10% off eligible items, apply
 one GBP5 voucher only when their **discounted** subtotal reaches GBP100, then
@@ -71,15 +74,44 @@ failure rather than speculate about one.
 
 The model's answer is a hypothesis, not the verdict. Expected totals are checked
 independently, and Node runs the comparison and regression tests. Muse cannot
-issue shell commands or execute generated code through this workflow.
+issue shell commands or execute generated code through this workflow. Both model
+turns use low reasoning effort within the fixed 4,096-output-token limit.
 
-The baskets above came from a real Muse response. A later walkthrough reused
-those cases, reran the baseline and correct-version comparison, and sent fresh
-results to Muse. It explained the discount/voucher error and chose to stop.
-That feedback produced no additional cases; the optional follow-up path is
-covered by offline tests, not a demonstrated live result.
+In A's verified live run on 28 October, Muse proposed the three baskets above.
+The original and reviewed correction matched their expected totals; the faulty
+refactor did not. Muse then received those execution results, explained the
+discount/voucher error and chose to stop. The identical exported test failed all
+three cases on the faulty code and passed all three on the correction.
+
+C's separate live run on 27 October reproduced incorrect charges on three baskets. Its
+feedback proposed two further baskets, which were checked and run without finding
+another defect. That run predates the latest feedback-effort adjustment. These
+are recorded prepared-example runs, not a measured success rate across real PRs.
 
 ## Run The Tests
+
+### Reloadable No-Model Preview
+
+```sh
+ota run demo:preview --agent
+```
+
+Open <http://127.0.0.1:48761/>. The same UI now supports a complete, reloadable
+walkthrough of both prepared scenarios, including review, before/after results,
+scripted feedback and follow-up, an inert download, and scripted red/green counts.
+Every result is labelled **FIXTURE**: no model, pricing code or test is executed.
+The server never reads a credential, live approval or live budget and never writes
+evidence. Its temporary scripted-turn counter is not model consumption. Reloading
+starts a fresh fixture walkthrough; ordinary state refresh preserves that
+walkthrough. Wrong expected totals are refused rather than changing canned
+results to match. Downloads contain comments only, not executable tests.
+
+The server serves only fixed web assets and bounded loopback API routes. Stop it
+with Ctrl-C before starting the live demo on the same port. This mode is for
+interface review, not evidence of a model discovery, execution or regression proof.
+Run `ota run verify:preview --agent` for its isolation and full-flow checks.
+
+### Offline Checks
 
 The reference environment is **macOS on Apple Silicon, Node.js 24.22.1 and
 [Ota](https://github.com/ota-run/ota) 1.6.28**. The contract requires that Node
@@ -182,11 +214,11 @@ root artifact.
 
 ## Scope
 
-This prototype reviews **one prepared checkout refactor**, not arbitrary
+This prototype reviews **two prepared checkout refactors**, not arbitrary
 repositories or production payment systems. Finding no failure in selected
 cases is not approval of an entire PR. It runs reviewed sample code, not
 untrusted uploaded code in a sandbox.
 
-Built for the Meta AI Developer Hackathon on October 26-27, 2026: the UI,
-Muse proposal/feedback integration, pricing runner and regression-test workflow
-are new work. Ota 1.6.28 is an existing tool used to run the declared checks.
+The new work for the Meta AI Developer Hackathon is the review UI, Muse
+proposal/feedback integration, pricing runner and regression-test workflow.
+Ota 1.6.28 is an existing tool used to run the declared checks.
