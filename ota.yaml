@@ -171,11 +171,25 @@ tasks:
       Synthetic providers/runners/reviewer declarations only. Tests own and remove
       unique temporary directories; they do not initialize the operational budget.
 
+  "verify:preview":
+    description: Check the isolated no-model fixture walkthrough and loopback HTTP refusals.
+    requirements:
+      toolchains: [node]
+    command:
+      exe: node
+      args: [--test, checks/fixture-preview.test.mjs]
+    effects:
+      network: true
+      network_kind: integration_test
+    notes: |
+      Ephemeral loopback listeners and authored in-memory fixtures only. No
+      provider, credentials, live approval/ledger access, code execution or writes.
+
   "verify:live-mvp":
     description: Run the finite offline pricing, UI and controller checks.
     only_on: [macos]
     aggregate:
-      tasks: [verify:pricing, verify:baseline, verify:baseline:c, verify:web, verify:live, verify:delivery]
+      tasks: [verify:pricing, verify:baseline, verify:baseline:c, verify:web, verify:live, verify:preview, verify:delivery]
     notes: |
       Not a live API, browser, exported-test, CI, release or production qualification.
 
@@ -211,6 +225,42 @@ tasks:
       Requires an actual persisted export. A reproduced candidate regression
       intentionally produces a failing assertion; missing export is not a pass.
       Recheck the export hash before running. No model-produced executable code.
+
+  "demo:preview":
+    description: Start the reloadable fixture-only UI walkthrough without models, execution or live-state access.
+    requirements:
+      toolchains: [node]
+    launch:
+      kind: command
+      exe: node
+      args: [tools/fixture-preview.mjs]
+    runtime:
+      kind: service
+      surfaces:
+        pricing:
+          bind:
+            address: 127.0.0.1
+            port:
+              mode: fixed
+              value: 48761
+          project:
+            host:
+              address: 127.0.0.1
+              port:
+                mode: fixed
+                value: 48761
+              path: /
+              primary: true
+    effects:
+      network: true
+      network_kind: integration_test
+    notes: |
+      Fixed authored responses and static web assets, not a model or execution
+      backend. Binds only loopback. A reload starts a new synthetic walkthrough;
+      scripted turns are not the live budget. No credentials, approval, ledger,
+      provider, child process, repository mutation or filesystem persistence.
+      Export downloads are inert samples. Stop before starting demo:live on the
+      same port. Task effects describe the service; they are not an OS sandbox.
 
   "demo:live:budget":
     description: Prepare a fresh bounded local session with automatic source/binary pins; no service or model request.
@@ -337,11 +387,13 @@ agent:
     - verify:baseline:c
     - verify:web
     - verify:live
+    - verify:preview
     - verify:live-mvp
     - verify:delivery
     - verify:export
     - demo:live:budget
     - demo:live
+    - demo:preview
   verify_after_changes:
     - verify:live-mvp
   writable_paths:
