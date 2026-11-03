@@ -1,0 +1,41 @@
+{
+  "notice": "Authored UI fixtures only. No model response, pricing execution, test execution or live evidence is represented by this file.",
+  "rule": {
+    "id": "fixture-pricing-v1",
+    "title": "Fixture checkout rule",
+    "text": "Discount eligible items by 10%, then apply one \u00a35 voucher if their discounted subtotal reaches \u00a3100. Add full-price items unchanged.",
+    "domain": "Prepared fixture baskets only; all amounts in the structured data are integer pence."
+  },
+  "baseline": {
+    "label": "Scripted baseline: three ordinary baskets, two versions",
+    "cases": [
+      { "id": "baseline-1", "title": "Eligible item", "lines": [{ "amount": 5000, "discountEligible": true }], "expectedTotal": 4500 },
+      { "id": "baseline-2", "title": "Full-price item", "lines": [{ "amount": 4000, "discountEligible": false }], "expectedTotal": 4000 },
+      { "id": "baseline-3", "title": "Ordinary mixed basket", "lines": [{ "amount": 6000, "discountEligible": true }, { "amount": 2000, "discountEligible": false }], "expectedTotal": 7400 }
+    ]
+  },
+  "changes": {
+    "a": {
+      "title": "Rework discounts and vouchers",
+      "diff": "FIXTURE PREVIEW: illustrative source description, not executable evidence.\n\nORIGINAL\nCalculate the discounted eligible subtotal, check the voucher, add full-price items.\n\nPROPOSED\nReorganise eligible subtotals, discount and voucher calculations.\n\nUse the scripted baskets to review the interface; no code is executed.",
+      "cases": [
+        { "id": "case-1", "lines": [{ "amount": 11000, "discountEligible": true }], "expectedTotal": 9900, "before": 9450, "rationale": "Fixture: 10% off \u00a3110.00 gives \u00a399.00, below the \u00a3100.00 threshold. No \u00a35.00 voucher applies." },
+        { "id": "case-2", "lines": [{ "amount": 20000, "discountEligible": true }], "expectedTotal": 17500, "before": 17550, "rationale": "Fixture: 10% off \u00a3200.00 gives \u00a3180.00. This meets the \u00a3100.00 threshold, so deduct the \u00a35.00 voucher for \u00a3175.00." }
+      ],
+      "followUp": [
+        { "id": "follow-1", "lines": [{ "amount": 12000, "discountEligible": true }, { "amount": 5000, "discountEligible": false }], "expectedTotal": 15300, "before": 15350, "rationale": "Fixture: \u00a3120.00 discounts to \u00a3108.00. Deduct \u00a35.00 and add the unchanged \u00a350.00 for \u00a3153.00." }
+      ]
+    },
+    "c": {
+      "title": "Calculate totals in one pass",
+      "diff": "FIXTURE PREVIEW: illustrative source description, not executable evidence.\n\nORIGINAL\nUse separate passes over eligible and full-price items.\n\nPROPOSED\nUse a single loop to accumulate the two totals.\n\nUse the scripted baskets to review the interface; no code is executed.",
+      "cases": [
+        { "id": "case-1", "lines": [{ "amount": 8000, "discountEligible": true }, { "amount": 3000, "discountEligible": false }], "expectedTotal": 10200, "before": 9700, "rationale": "Fixture: \u00a380.00 discounts to \u00a372.00, below the \u00a3100.00 threshold. Add the unchanged \u00a330.00 for \u00a3102.00." },
+        { "id": "case-2", "lines": [{ "amount": 12000, "discountEligible": true }], "expectedTotal": 10300, "before": 10300, "rationale": "Fixture: \u00a3120.00 discounts to \u00a3108.00. The \u00a35.00 voucher applies, leaving \u00a3103.00." }
+      ],
+      "followUp": [
+        { "id": "follow-1", "lines": [{ "amount": 12000, "discountEligible": false }], "expectedTotal": 12000, "before": 11500, "rationale": "Fixture: all \u00a3120.00 is full-price, so neither the discount nor the \u00a35.00 voucher applies." }
+      ]
+    }
+  }
+}
