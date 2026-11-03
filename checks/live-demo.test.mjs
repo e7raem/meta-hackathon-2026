@@ -9,7 +9,7 @@ import { BudgetLedger, initializeBudget, persistRegression, createController, ch
   buildRunnerEnvironment, exportRegression, ruleTotal, createLifecycle, museProposal, closeProviderRequests,
   feedbackContext, feedbackFromResponse, validateRetainedCheckpoint, loadRetainedCheckpoint,
   createFeedbackAttempts, museFeedback, prepareSession, loadOwnerSession,
-  validateSessionWindow, startupHint, exportArtifactPath, RUNTIME_FILES, ORIGIN } from "../tools/live-demo.mjs";
+  validateSessionWindow, startupHint, exportArtifactPath, RUNTIME_FILES, MAX_RUNTIME_SOURCE_BYTES, ORIGIN } from "../tools/live-demo.mjs";
 
 // All providers/runners/reviewer decisions in this file are synthetic offline fixtures.
 const TEMP = fileURLToPath(new URL("../evidence/live-tests/", import.meta.url));
@@ -490,12 +490,14 @@ test("response error, aborted and premature close settle once and retain consume
     assert.equal(dispatches, 1); assert.equal(f.calls.reservations, 1);
     assert.equal(requestBody.max_output_tokens, 4096);
     assert.equal(requestBody.model, "muse-spark-1.3");
+    assert.match(requestBody.input, /Format every monetary amount in rationale and explanation as pounds sterling with the pound sign and exactly two decimal places, not raw pence\./);
+    assert.match(requestBody.input, /Keep percentages and counts unchanged\. JSON lines\[\]\.amount and expectedTotal must remain integer pence\./);
     assert.equal(requestBody.store, false);
     assert.equal(requestBody.stream, false);
     assert.deepEqual(requestBody.tools, []);
     assert.deepEqual(Object.keys(requestBody).sort(),
-      ["model", "input", "store", "stream", "tools", "max_output_tokens", "text"].sort());
-    assert.equal(Object.hasOwn(requestBody, "reasoning"), false, "initial discovery keeps its existing reasoning policy");
+      ["model", "input", "store", "stream", "tools", "reasoning", "max_output_tokens", "text"].sort());
+    assert.deepEqual(requestBody.reasoning, { effort: "low" });
     assert.equal(requestBody.text.format.name, "pricing_cases");
     assert.equal(requestBody.text.format.strict, true);
     assert.equal(f.calls.retained[0].value.outcome, "FAILED_OR_UNKNOWN_CONSUMED");
@@ -771,7 +773,7 @@ test("retained-root export and regression append fresh request records without c
   });
 });
 
-test("feedback alone uses fixed low reasoning with the same model/4096 cap, closed schema and no tools", async () => {
+test("feedback uses fixed low reasoning with the same model/4096 cap, closed schema and no tools", async () => {
   let body, options, url; const req = new EventEmitter(), res = new EventEmitter();
   const keyText = "synthetic-test-credential-never-real", key = Buffer.from(keyText);
   req.destroy = () => req.emit("close");
@@ -788,6 +790,8 @@ test("feedback alone uses fixed low reasoning with the same model/4096 cap, clos
   });
   assert.equal(url, "https://api.meta.ai/v1/responses"); assert.equal(options.method, "POST");
   assert.equal(body.max_output_tokens, 4096); assert.equal(body.model, "muse-spark-1.3");
+  assert.match(body.input, /Format every monetary amount in rationale and explanation as pounds sterling with the pound sign and exactly two decimal places, not raw pence\./);
+  assert.match(body.input, /Keep percentages and counts unchanged\. JSON lines\[\]\.amount and expectedTotal must remain integer pence\./);
   assert.equal(body.store, false); assert.equal(body.stream, false); assert.deepEqual(body.tools, []);
   assert.deepEqual(body.reasoning, { effort: "low" });
   assert.deepEqual(Object.keys(body).sort(),
@@ -796,6 +800,40 @@ test("feedback alone uses fixed low reasoning with the same model/4096 cap, clos
   assert.equal(body.text.format.type, "json_schema"); assert.equal(body.text.format.strict, true);
   assert.equal(body.text.format.name, "pricing_feedback"); assert.equal(body.text.format.schema.additionalProperties, false);
   assert.equal(raw.echo, "[REDACTED]"); assert.ok(key.every((x) => x === 0));
+});
+
+test("reasoning-heavy incomplete initial proposal is retained, refused and consumed once without retry", async () => {
+  const incomplete = { status: "incomplete", model: "muse-spark-1.3", error: null,
+    incomplete_details: { reason: "max_output_tokens" },
+    usage: { input_tokens: 602, output_tokens: 4096, output_tokens_details: { reasoning_tokens: 3838 } },
+    output: [{ type: "message", content: [{ type: "output_text", text: '{"cases":[' }] }] };
+  let dispatches = 0, body;
+  const key = Buffer.from("synthetic-test-credential-never-real");
+  const f = await fixture({ provider: (packet) => museProposal("unused-fixture-path", packet, scope.deadline, {
+    now: () => NOW, readCredential: async () => key,
+    reasoning: { effort: "max" }, reasoning_effort: "high", max_output_tokens: 99999,
+    request: (_url, _options, callback) => {
+      dispatches++;
+      const req = new EventEmitter(), res = new EventEmitter();
+      req.destroy = () => req.emit("close");
+      req.end = (value) => { body = JSON.parse(value); };
+      res.statusCode = 200; res.complete = true;
+      queueMicrotask(() => {
+        callback(res); res.emit("data", Buffer.from(JSON.stringify(incomplete)));
+        res.emit("end"); req.emit("close");
+      });
+      return req;
+    },
+  }) });
+  const request = { changeId: "a", requestId: "proposal-incomplete-once" };
+  await assert.rejects(() => f.controller.action("/api/propose", request), /MODEL_INCOMPLETE/);
+  assert.deepEqual(body.reasoning, { effort: "low" }); assert.equal(body.max_output_tokens, 4096);
+  assert.equal(Object.hasOwn(body, "reasoning_effort"), false);
+  assert.deepEqual(f.calls.retained.find((entry) => entry.name === "model-1").value, incomplete);
+  assert.equal(f.calls.runner, 0); assert.equal(f.calls.reservations, 1);
+  await assert.rejects(() => f.controller.action("/api/propose", request));
+  assert.equal(dispatches, 1); assert.equal(f.calls.reservations, 1);
+  assert.ok(key.every((byte) => byte === 0));
 });
 
 test("reasoning-heavy incomplete feedback is retained, refused and consumed once without retry", async () => {
@@ -873,6 +911,23 @@ test("fresh explicit session preparation auto-pins sources/binaries, creates a p
     await assert.rejects(load, /REQUEST_BUDGET_EXHAUSTED/);
     await assert.rejects(prepare, /SESSION_ALREADY_EXISTS/);
     assert.equal((await restarted.ledger.ready()).reservations.length, 2);
+  });
+});
+
+test("runtime source pins accept the bounded 256 KiB source and refuse even one byte beyond it", async () => {
+  assert.equal(MAX_RUNTIME_SOURCE_BYTES, 256 * 1024);
+  await sessionFixture(async ({ root, prepare, load }) => {
+    const path = join(root, "web/app.js");
+    await writeFile(path, Buffer.alloc(MAX_RUNTIME_SOURCE_BYTES, 32), { mode: 0o600 });
+    await prepare();
+    await load();
+    await writeFile(path, Buffer.alloc(MAX_RUNTIME_SOURCE_BYTES + 1, 32), { mode: 0o600 });
+    await assert.rejects(load, /PINNED_FILE_INVALID/);
+  });
+  await sessionFixture(async ({ root, prepare }) => {
+    await writeFile(join(root, "web/app.js"), Buffer.alloc(MAX_RUNTIME_SOURCE_BYTES + 1, 32), { mode: 0o600 });
+    await assert.rejects(prepare, /PINNED_FILE_INVALID/);
+    await assert.rejects(() => lstat(join(root, "evidence")), /ENOENT/);
   });
 });
 

@@ -21,6 +21,12 @@ import {
   createStore,
   initialState,
   getSelectedChange,
+  getPendingPresentation,
+  presentPendingButton,
+  getSessionUsageText,
+  getBaselineButtonPresentation,
+  getFaultEvidence,
+  getAcceptanceFailurePresentation,
   formatPence,
   describeChargeDifference,
   formatTokenUsage,
@@ -816,13 +822,13 @@ test("valid empty proposal is visibly inconclusive, never comparison approval or
 
 test("baseline, proposal and comparison origins must stay literal; RECORDED data is never promoted", async () => {
   const { store } = makeApp([
-    () => respond(200, sessionBody()),
+    () => respond(200, sessionBody({ mode: "LIVE" })),
     () => respond(200, baselineBody({ origin: "FIXTURE" })),
   ]);
   await store.loadSession();
   const baselineResult = await store.runBaseline();
   assert.equal(baselineResult.ok, false,
-    "a baseline that is not an actual local execution is refused");
+    "a LIVE session refuses a fixture baseline");
   assert.equal(store.getState().baseline, null);
   assert.match(store.getState().errors.baseline, /LOCAL_EXECUTION/);
 
@@ -1162,13 +1168,13 @@ function followUpControlBody(overrides = {}) {
 
 // Journey through session, baseline, proposal, acceptance, comparison and
 // a successful correct-B control. Five POSTs: req-1 .. req-5.
-async function appAtControl(extraPlan = []) {
+async function appAtControl(extraPlan = [], mode = "FIXTURE") {
   const app = makeApp([
-    () => respond(200, sessionBody()),
+    () => respond(200, sessionBody({ mode })),
     () => respond(200, baselineBody()),
-    () => respond(200, proposalBody()),
-    () => respond(200, acceptedBody()),
-    () => respond(200, comparisonBody({ status: "REPRODUCED" })),
+    () => respond(200, proposalBody({ origin: mode })),
+    () => respond(200, acceptedBody({ origin: mode })),
+    () => respond(200, comparisonBody({ status: "REPRODUCED", origin: mode })),
     () => respond(200, controlBody()),
     ...extraPlan,
   ]);
@@ -1861,4 +1867,552 @@ test("native labelled selector renders selected identities and refuses selection
   assert.equal(source.includes("state.session.changes[0]"), false, "rendering must not be hard-coded to the first candidate");
   assert.equal(source.includes("nodes.changeSelector.disabled = !state.session || Boolean(state.inFlight) || state.proposalPending"), true);
   assert.equal(source.includes("const change = getSelectedChange(state)"), true);
+});
+
+test("prepared changes explain implementation differences without exposing the answer", async () => {
+  const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../web/styles.css", import.meta.url), "utf8");
+  const controller = await readFile(new URL("../tools/live-demo.mjs", import.meta.url), "utf8");
+  const definition = "Two prepared rewrites of the same checkout calculator. Both are meant to preserve the pricing rule below. We use Muse to look for a basket the existing tests missed, then run it to check the charge.";
+  assert.equal(html.split(definition).length - 1, 1);
+  assert.ok(controller.includes('title: id === "a" ? "Rework discounts and vouchers" : "Calculate totals in one pass"'));
+  assert.match(html, /id="change-context" aria-live="polite" aria-atomic="true"/);
+  assert.ok(html.includes("<strong>Pricing rule (unchanged):</strong>"));
+  const renderer = source.slice(source.indexOf("function renderChange(state)"), source.indexOf("function renderBaseline(state)"));
+  assert.match(renderer, /nodes\.changeContext\.textContent = change\?\.id === "a"\s*\? "Changes how eligible-item subtotals, the 10% discount and the £5 voucher are combined into the final charge\."\s*: change\?\.id === "c"\s*\? "Replaces separate passes over eligible and full-price items with a single loop that accumulates both totals\."\s*: ""/);
+  assert.match(renderer, /el\("option", \{ value: entry\.id \}, entry\.title\)/);
+  assert.match(renderer, /nodes\.prTitle\.textContent = change\?\.title \?\? ""/);
+  assert.ok(renderer.indexOf("View proposed code changes (read-only)") < renderer.indexOf("Full rule and input units"));
+  assert.match(renderer, /el\("pre", \{ class: "diff" \}, change\.diff\)/);
+  assert.match(css, /\.endnote > details\s*\{\s*border-top: 0;\s*\}/);
+  assert.match(css, /\.step\s*\{[^}]*border-bottom: 1px solid var\(--line\)/);
+  assert.match(css, /\ndetails\s*\{\s*border-top: 1px solid var\(--line\)/);
+});
+
+function presentationButton() {
+  return {
+    textContent: "Ask Muse for breaking baskets",
+    disabled: false,
+    attributes: {},
+    setAttribute(name, value) { this.attributes[name] = value; },
+  };
+}
+
+test("every async store operation has a stage-specific accessible pending presentation", async () => {
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const operations = new Set([...source.matchAll(/state\.inFlight = "([a-z_]+)"/g)].map((match) => match[1]));
+  assert.equal(operations.size, 13);
+  for (const operation of operations) {
+    const presentation = getPendingPresentation(operation);
+    assert.ok(presentation, operation);
+    assert.ok(presentation.label.length > 0);
+    assert.ok(presentation.detail.length > 0);
+    assert.ok(["change", "basket", "test"].includes(presentation.step));
+    assert.doesNotMatch(presentation.detail, /\d+%|complete|succeeded|approved/i);
+    const button = presentationButton();
+    presentPendingButton(button, presentation, "Idle");
+    assert.equal(button.textContent, presentation.label);
+    assert.equal(button.attributes["aria-busy"], "true");
+    assert.equal(button.disabled, true);
+    presentPendingButton(button, null, "Idle");
+    assert.equal(button.textContent, "Idle");
+    assert.equal(button.attributes["aria-busy"], "false");
+    assert.equal(button.disabled, true, "presentation must not bypass the render/store eligibility guards");
+  }
+  assert.equal(getPendingPresentation(null), null);
+  assert.equal(getPendingPresentation("toString"), null);
+});
+
+test("Ask Muse paints pending synchronously even while its budget becomes unknown", async () => {
+  let resolveProposal;
+  const app = makeApp([
+    () => respond(200, sessionBody()),
+    () => respond(200, baselineBody()),
+    () => new Promise((resolve) => { resolveProposal = resolve; }),
+  ]);
+  await app.store.loadSession();
+  await app.store.runBaseline();
+  const button = presentationButton();
+  app.store.subscribe((state) => {
+    presentPendingButton(button, getPendingPresentation(state.inFlight),
+      state.budgetKnown ? "Ask Muse for breaking baskets" : "Refresh usage (no model call)");
+  });
+  const request = app.store.propose();
+  assert.equal(app.store.getState().inFlight, "propose");
+  assert.equal(app.store.getState().budgetKnown, false);
+  assert.equal(button.textContent, "Asking Muse...", "the pending request must not look like a usage refresh");
+  assert.equal(button.attributes["aria-busy"], "true");
+  assert.equal(button.disabled, true);
+  assert.deepEqual(app.store.selectChange("c"), { ok: false, reason: "busy" });
+  assert.deepEqual(await app.store.propose(), { ok: false, reason: "busy" });
+  resolveProposal(respond(200, proposalBody()));
+  assert.deepEqual(await request, { ok: true });
+  assert.equal(button.attributes["aria-busy"], "false");
+  assert.equal(button.textContent, "Ask Muse for breaking baskets");
+  assert.equal(app.store.getState().session.callsUsed, 1);
+  assert.equal(app.calls.length, 3, "no extra request or retry for presentation");
+});
+
+test("feedback shows pending before awaiting and clears it without reopening a consumed request", async () => {
+  let resolveFeedback;
+  const app = await appAtControl([
+    () => new Promise((resolve) => { resolveFeedback = resolve; }),
+  ]);
+  const button = presentationButton();
+  app.store.subscribe((state) => {
+    presentPendingButton(button, getPendingPresentation(state.inFlight),
+      state.budgetKnown ? "Send verified results back to Muse (one request)" : "Refresh usage (no model call)");
+  });
+  const callsBefore = app.calls.length;
+  const request = app.store.requestFeedback();
+  assert.equal(app.store.getState().inFlight, "feedback");
+  assert.equal(button.textContent, "Waiting for Muse's feedback...");
+  assert.equal(button.attributes["aria-busy"], "true");
+  assert.equal(app.store.getState().feedbackAttempted, true);
+  assert.deepEqual(app.store.selectChange("c"), { ok: false, reason: "busy" });
+  await Promise.resolve(); // Let the mocked fetch install its deferred response.
+  resolveFeedback(respond(502, {
+    error: { code: "PROVIDER_FAILED_CONSUMED", message: "synthetic provider failure" },
+  }));
+  assert.equal((await request).ok, false);
+  assert.equal(button.attributes["aria-busy"], "false");
+  assert.equal(button.textContent, "Refresh usage (no model call)");
+  assert.equal(app.store.getState().budgetKnown, false);
+  assert.equal(app.store.getState().feedbackAttempted, true);
+  assert.ok(app.store.getState().errors.feedback);
+  assert.deepEqual(await app.store.requestFeedback(), { ok: false, reason: "already_attempted" });
+  assert.equal(app.calls.length, callsBefore + 1);
+});
+
+test("long-response patience text stays presentation-only and never promises progress", () => {
+  for (const operation of ["propose", "feedback", "baseline", "usage"]) {
+    const initial = getPendingPresentation(operation);
+    const slow = getPendingPresentation(operation, true);
+    assert.equal(slow.label, initial.label);
+    assert.equal(slow.step, initial.step);
+    assert.match(slow.detail, /No automatic retry is being made/);
+    assert.match(slow.detail, operation === "propose" || operation === "feedback"
+      ? /Still waiting for Muse/ : /Still waiting for the local backend/);
+    assert.doesNotMatch(slow.detail, /\d+%|almost done|complete|approved/i);
+  }
+});
+
+test("session usage does not suggest refreshing during an active model request", () => {
+  const state = { ...initialState(), session: sessionBody({ mode: "LIVE", callsUsed: 1, limit: 4 }), budgetKnown: false };
+  for (const inFlight of ["propose", "feedback"]) {
+    const text = getSessionUsageText({ ...state, inFlight });
+    assert.equal(text, "Muse is working; request usage updates when it finishes.");
+    assert.doesNotMatch(text, /refresh|used \(last confirmed\)/i);
+  }
+  assert.equal(getSessionUsageText({ ...state, inFlight: "usage" }),
+    "Refreshing request usage; no model call is made.");
+  assert.equal(getSessionUsageText(state), "Model usage unknown or pending; refresh before another request");
+  assert.equal(getSessionUsageText({ ...state, budgetKnown: true }),
+    "1 of 4 model requests used (last confirmed)");
+  assert.equal(state.budgetKnown, false);
+  assert.equal(state.session.callsUsed, 1);
+});
+
+test("review markup exposes the three-step path, live activity and reduced-motion busy state", async () => {
+  const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
+  const css = await readFile(new URL("../web/styles.css", import.meta.url), "utf8");
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  for (const stage of ["change", "basket", "test"]) {
+    assert.ok(html.includes(`href="#stage-${stage}" id="path-${stage}"`));
+  }
+  assert.match(html, /id="activity"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"/);
+  assert.match(css, /button\[aria-busy="true"\]::before/);
+  assert.match(css, /prefers-reduced-motion: reduce/);
+  assert.match(source, /el\("details", \{\},\s*el\("summary", \{\}, "View proposed code changes \(read-only\)"\)/);
+  assert.match(source, /renderFollowUp\(state\);\s*renderActivity\(state\);/);
+  assert.match(source, /clearTimeout\(patienceTimer\)/);
+  assert.match(source, /current\.epoch.*current\.inFlight/);
+});
+
+async function acceptanceReview(followUp, responses) {
+  const app = followUp ? await appAtControl([() => respond(200, feedbackBody()), ...responses]) : makeApp([
+    () => respond(200, sessionBody()), () => respond(200, baselineBody()),
+    () => respond(200, proposalBody()), ...responses,
+  ]);
+  if (followUp) await app.store.requestFeedback();
+  else { await app.store.loadSession(); await app.store.runBaseline(); await app.store.propose(); }
+  return {
+    ...app,
+    edit: (value) => followUp ? app.store.setFollowUpExpectation("case-3", value) : app.store.setExpectation("case-1", value),
+    confirm: () => followUp ? app.store.confirmFollowUpReview(true) : app.store.confirmReview(true),
+    accept: () => followUp ? app.store.acceptFollowUp() : app.store.accept(),
+    compare: () => followUp ? app.store.compareFollowUp() : app.store.compare(),
+    review: () => followUp ? app.store.getState().followUp : app.store.getState(),
+  };
+}
+
+test("both review paths prominently classify confirmed expected-total rejection using typed codes and actual submissions", async () => {
+  for (const followUp of [false, true]) {
+    for (const code of ["EXPECTATION_RULE_MISMATCH", "FIXTURE_EXPECTATION_MISMATCH"]) {
+      const app = await acceptanceReview(followUp, [
+        () => respond(422, { error: { code, message: "The submitted total was rejected." } }),
+      ]);
+      app.edit("0.00"); app.confirm();
+      assert.equal((await app.accept()).ok, false);
+      const failure = app.review().acceptanceFailure;
+      const submitted = JSON.parse(app.calls.at(-1).options.body).expectations;
+      assert.deepEqual(failure.submitted, submitted, "display values come from the submitted request, not the model answer");
+      assert.equal(failure.code, code);
+      const view = getAcceptanceFailurePresentation(failure);
+      assert.equal(view.title, "Expected total rejected");
+      assert.equal(view.boundary, "Comparison blocked");
+      assert.equal(view.rejected, true);
+      assert.match(view.submitted, /£0\.00/);
+      assert.doesNotMatch(view.submitted, /£9\.00|£13\.50/);
+      assert.match(view.explanation, /review-input rejection, not a new checkout-code failure/);
+      const calls = app.calls.length;
+      assert.equal((await app.compare()).ok, false);
+      assert.equal(app.calls.length, calls, "a rejected expectation cannot start comparison or trigger a retry");
+      assert.equal(app.review().accepted, null);
+    }
+  }
+});
+
+test("network, other server errors and untrusted acceptance echoes never masquerade as a wrong expected total", async () => {
+  for (const followUp of [false, true]) {
+    const altered = followUp ? followUpAcceptedBody() : acceptedBody();
+    altered.acceptedCases[0].expectedTotal = 1234;
+    for (const response of [
+      () => { throw new Error("EXPECTATION_RULE_MISMATCH in a transport message is not a server rejection"); },
+      () => respond(500, { error: { code: "SERVER_UNAVAILABLE", message: "Acceptance could not be confirmed." } }),
+      () => respond(200, altered),
+    ]) {
+      const app = await acceptanceReview(followUp, [response]);
+      app.confirm();
+      assert.equal((await app.accept()).ok, false);
+      const view = getAcceptanceFailurePresentation(app.review().acceptanceFailure);
+      assert.equal(view.rejected, false);
+      assert.equal(view.title, "Acceptance not confirmed");
+      assert.equal(view.boundary, "Comparison blocked");
+      assert.match(view.explanation, /does not establish that your totals are wrong/);
+      assert.match(view.recovery, /Reload if acceptance may already have been recorded/);
+      assert.equal(app.review().accepted, null);
+      assert.equal((await app.compare()).ok, false);
+    }
+  }
+});
+
+test("editing and successful acceptance clear rejection presentation without changing review or frozen-provenance rules", async () => {
+  for (const followUp of [false, true]) {
+    const app = await acceptanceReview(followUp, [
+      () => respond(422, { error: { code: "EXPECTATION_RULE_MISMATCH", message: "Check the written rule." } }),
+      () => respond(200, followUp ? followUpAcceptedBody() : acceptedBody()),
+    ]);
+    app.edit("0.00"); app.confirm();
+    await app.accept();
+    assert.ok(app.review().acceptanceFailure);
+    app.edit(followUp ? "13.00" : "9.00");
+    assert.equal(app.review().acceptanceFailure, null);
+    assert.equal(app.review().reviewedConfirmed, false);
+    assert.equal((await app.accept()).ok, false, "recovery still requires a fresh review confirmation");
+    app.confirm();
+    assert.deepEqual(await app.accept(), { ok: true });
+    assert.equal(app.review().acceptanceFailure, null);
+    assert.equal(app.review().accepted.acceptedCases[0].expectationOrigin, followUp ? "REVIEWER_CORRECTED" : "META_ACCEPTED");
+    assert.deepEqual(app.edit("1.00"), { ok: false, reason: "frozen" });
+    assert.equal(app.store.getState().session.callsUsed, followUp ? 2 : 1);
+  }
+});
+
+test("accepted LIVE reviewer corrections keep provenance but hide the unverified draft badge in both paths", async () => {
+  const initialProposal = proposalBody({ origin: "LIVE" });
+  initialProposal.cases[0].expectedTotal = 800;
+  const initialAcceptance = acceptedBody({ origin: "LIVE" });
+  initialAcceptance.acceptedCases[0].expectationOrigin = "REVIEWER_CORRECTED";
+  const initial = makeApp([
+    () => respond(200, sessionBody({ mode: "LIVE" })), () => respond(200, baselineBody()),
+    () => respond(200, initialProposal), () => respond(200, initialAcceptance),
+  ]);
+  await initial.store.loadSession(); await initial.store.runBaseline(); await initial.store.propose();
+  initial.store.setExpectation("case-1", "9.00"); initial.store.confirmReview(true);
+  assert.equal((await initial.store.accept()).ok, true);
+  const root = initial.store.getState();
+  assert.equal(root.expectations["case-1"].edited, true);
+  assert.equal(root.accepted.acceptedCases[0].expectationOrigin, "REVIEWER_CORRECTED");
+  assert.equal(!root.expectations["case-1"].edited || Boolean(root.accepted), true);
+
+  const proposal = followUpProposalBody({ origin: "LIVE" });
+  proposal.cases[0].expectedTotal = 1300;
+  const accepted = followUpAcceptedBody({ origin: "LIVE" });
+  accepted.acceptedCases[0].expectedTotal = 1350;
+  const follow = await appAtControl([
+    () => respond(200, feedbackBody({ origin: "LIVE", proposal })), () => respond(200, accepted),
+  ], "LIVE");
+  await follow.store.requestFeedback(); follow.store.setFollowUpExpectation("case-3", "13.50");
+  follow.store.confirmFollowUpReview(true);
+  assert.equal((await follow.store.acceptFollowUp()).ok, true);
+  const followUp = follow.store.getState().followUp;
+  assert.equal(followUp.expectations["case-3"].edited, true);
+  assert.equal(followUp.accepted.acceptedCases[0].expectationOrigin, "REVIEWER_CORRECTED");
+  assert.equal(!followUp.expectations["case-3"].edited || Boolean(followUp.accepted), true);
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  assert.ok(source.includes('row.querySelector(\'[data-role="edited"]\').hidden = !entry.edited || Boolean(state.accepted)'));
+  assert.ok(source.includes('row.querySelector(\'[data-role="edited"]\').hidden = !entry.edited || Boolean(followUp.accepted)'));
+});
+
+test("green acceptance cards use locked accepted records, not proposed or editable totals, in both review paths", async () => {
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../web/styles.css", import.meta.url), "utf8");
+  const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
+  const list = source.slice(source.indexOf("function acceptedCasesList(accepted)"), source.indexOf("function renderAcceptanceSuccess("));
+  assert.match(list, /for \(const entry of accepted\.acceptedCases\)/);
+  assert.match(list, /class: "accepted-total-value" \}, formatPence\(entry\.expectedTotal\)/);
+  assert.ok(list.includes('entry.expectationOrigin === "REVIEWER_CORRECTED"'));
+  assert.doesNotMatch(list, /state\.proposal|state\.expectations/);
+  assert.ok(source.includes("renderAcceptanceSuccess(nodes.acceptStatus, state.accepted)"));
+  assert.ok(source.includes("renderAcceptanceSuccess(nodes.followupAcceptStatus, followUp.accepted, true)"));
+  assert.ok(source.includes('followUp ? "Follow-up totals accepted" : "Expected totals accepted"'));
+  assert.ok(source.includes('"Locked for comparison"'));
+  assert.ok(source.includes("Acceptance alone does not show that the checkout code is correct."));
+  assert.ok(source.includes("Scripted totals are locked for this walkthrough. No model or pricing code was run."));
+  assert.equal(source.includes("nodes.acceptedPanel.append("), false, "no duplicate accepted list below the card");
+  assert.equal(source.includes("nodes.followupAcceptedPanel.append("), false);
+  for (const id of ["accept-status", "followup-accept-status"]) {
+    assert.match(html, new RegExp(`<div id="${id}"[^>]*aria-atomic="true"`));
+  }
+  assert.match(css, /\.acceptance-success\s*\{[^}]*border-left: 5px solid var\(--green\);[^}]*background: var\(--green-wash\)/);
+  assert.match(css, /\.acceptance-title\s*\{[^}]*font-weight: 800;[^}]*text-transform: uppercase/);
+});
+
+test("important monetary figures are large while proposed, accepted and executed meanings stay explicit", async () => {
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../web/styles.css", import.meta.url), "utf8");
+  assert.ok(source.includes('el("span", { class: "case-expected-label" }, "Proposed expected total")'));
+  assert.ok(source.includes('el("strong", { class: "case-expected-value" }, formatPence(entry.expectedTotal))'));
+  for (const selector of [".case-expected-value", ".accepted-total-value", ".fault-amounts dd"]) {
+    const declaration = css.slice(css.indexOf(`${selector} {`), css.indexOf("}", css.indexOf(`${selector} {`)));
+    assert.ok(declaration.includes("font-size: clamp(1.6rem, 3.5vw, 2rem)"));
+    assert.ok(declaration.includes("font-weight: 800"));
+  }
+  assert.match(css, /\.exp-row \.money-field input\s*\{[^}]*font-size: 1\.2rem;[^}]*min-height: 3rem/);
+  assert.match(css, /\.money-field\s*\{[^}]*max-width: 100%/);
+});
+
+test("acceptance rejection uses the pass-card visual weight, accessible alerts and unverified draft badges in both paths", async () => {
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../web/styles.css", import.meta.url), "utf8");
+  const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
+  assert.ok(source.includes('renderAcceptanceFailure(nodes.acceptStatus, state.acceptanceFailure, state.errors.accept)'));
+  assert.ok(source.includes('renderAcceptanceFailure(nodes.followupAcceptStatus, followUp.acceptanceFailure, state.errors.followUpAccept)'));
+  assert.ok(source.includes('node.setAttribute("role", tone === "error" ? "alert" : "status")'));
+  assert.ok(source.includes('node.setAttribute("aria-live", tone === "error" ? "assertive" : "polite")'));
+  assert.equal([...source.matchAll(/"data-role": "edited" \}, "Edited, not verified"/g)].length, 2);
+  assert.ok(source.includes('? "reviewer corrected"'), "accepted, backend-validated provenance remains unchanged");
+  assert.match(css, /\.acceptance-rejection\s*\{[^}]*border-left: 5px solid var\(--red\);[^}]*background: var\(--red-wash\)/);
+  assert.match(css, /\.rejection-title\s*\{[^}]*font-size: clamp\(1\.4rem, 3vw, 1\.8rem\);[^}]*font-weight: 800;[^}]*text-transform: uppercase/);
+  for (const id of ["accept-status", "followup-accept-status"]) {
+    assert.match(html, new RegExp(`id="${id}"[^>]*aria-atomic="true"`));
+  }
+});
+
+function faultComparison() {
+  const comparison = comparisonBody({ status: "REPRODUCED" });
+  comparison.rows[1].candidate = { value: 2800, error: null };
+  return comparison;
+}
+
+test("fault summary derives the missed basket and before/after amounts from actual bound records", () => {
+  const comparison = faultComparison();
+  const accepted = acceptedBody().acceptedCases;
+  const before = getFaultEvidence(comparison, accepted, baselineBody());
+  assert.equal(before.expected, 2900);
+  assert.equal(before.before, 2800);
+  assert.equal(before.after, null, "a corrected amount is never invented before execution");
+  assert.equal(before.baselineLinked, true);
+  assert.equal(before.absentFromBaseline, true);
+  assert.equal(before.impact, "Shop undercharges £1.00");
+  assert.deepEqual(before.lines, accepted[1].lines);
+  const after = getFaultEvidence(comparison, accepted, baselineBody(), controlBody());
+  assert.equal(after.after, 2900);
+  assert.equal(after.controlAttempted, true);
+});
+
+test("a suggestion, no counterexample, errors or a wrong original never manufacture a fault summary", () => {
+  const accepted = acceptedBody().acceptedCases;
+  assert.equal(getFaultEvidence(null, accepted), null);
+  for (const status of ["NO_COUNTEREXAMPLE", "INCONCLUSIVE"]) {
+    assert.equal(getFaultEvidence({ ...faultComparison(), status }, accepted), null);
+  }
+  const edits = [
+    (row) => { row.candidate = { value: row.expectedTotal, error: null }; },
+    (row) => { row.candidate = { value: null, error: "synthetic error" }; },
+    (row) => { row.original.value = 2800; },
+    (row) => { row.original = { value: null, error: "synthetic error" }; },
+  ];
+  for (const edit of edits) {
+    const comparison = faultComparison();
+    edit(comparison.rows[1]);
+    assert.equal(getFaultEvidence(comparison, accepted), null);
+  }
+  const altered = structuredClone(accepted);
+  altered[1].expectedTotal = 2800;
+  assert.equal(getFaultEvidence(faultComparison(), altered), null);
+});
+
+test("old-tests-missed wording requires matching source identities and an absent basket", () => {
+  const comparison = faultComparison();
+  const accepted = acceptedBody().acceptedCases;
+  for (const baseline of [null, baselineBody({ status: "FAIL" }),
+    baselineBody({ sourceIdentities: { original: HEX_D, candidate: HEX_B } }),
+    baselineBody({ sourceIdentities: { original: HEX_A, candidate: HEX_D } })]) {
+    const evidence = getFaultEvidence(comparison, accepted, baseline);
+    assert.equal(evidence.baselineLinked, false);
+    assert.equal(evidence.absentFromBaseline, false);
+  }
+  const covered = baselineBody();
+  covered.coverage.cases[2].lines = [...accepted[1].lines].reverse();
+  const evidence = getFaultEvidence(comparison, accepted, covered);
+  assert.equal(evidence.baselineLinked, true);
+  assert.equal(evidence.absentFromBaseline, false, "reordering an old basket is not a missed example");
+});
+
+test("after amount requires the matching executed control and does not conceal a still-wrong correction", () => {
+  const comparison = faultComparison();
+  const accepted = acceptedBody().acceptedCases;
+  const edits = [
+    (control) => { control.runId = "other-run"; },
+    (control) => { control.acceptedId = "other-acceptance"; },
+    (control) => { control.sourceIdentities.original = HEX_D; },
+    (control) => { control.status = "INCONCLUSIVE"; },
+    (control) => { control.rows[1].expectedTotal = 2800; },
+    (control) => { control.rows[1].candidate = { value: null, error: "synthetic error" }; },
+  ];
+  for (const edit of edits) {
+    const control = controlBody();
+    edit(control);
+    assert.equal(getFaultEvidence(comparison, accepted, baselineBody(), control).after, null);
+  }
+  const wrong = controlBody({ status: "REPRODUCED" });
+  wrong.rows[1].candidate.value = 2800;
+  assert.equal(getFaultEvidence(comparison, accepted, baselineBody(), wrong).after, 2800);
+});
+
+test("the visible story leads with executed price differences and keeps retained and red-green scope explicit", async () => {
+  const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../web/styles.css", import.meta.url), "utf8");
+  assert.ok(html.includes("<h1>Catch checkout bugs your tests missed.</h1>"));
+  assert.ok(html.includes("check its expected total, then run the code"));
+  for (const label of ["Expected by the rule", "Before · proposed code", "After · pre-reviewed correction",
+    "The old tests passed. This basket exposed a wrong charge.", "Not checked yet", "Not established"]) {
+    assert.ok(source.includes(label));
+  }
+  assert.ok(source.includes('${retained ? "RETAINED " : ""}${origin} · ${origin === "FIXTURE" ? "SCRIPTED COMPARISON" : "EXECUTED COMPARISON"}'));
+  assert.ok(source.includes("The before result is retained evidence, not a fresh execution or a new model discovery."));
+  assert.ok(source.includes("Same test: fails before, passes after."));
+  assert.ok(source.includes("state.regression.testSha256 === state.exportResult?.sha256"));
+  assert.match(css, /\.fault-evidence\s*\{[^}]*border-left: 5px solid var\(--red\)/);
+  assert.match(css, /\.fault-amounts\s*\{[^}]*grid-template-columns: repeat\(auto-fit/);
+});
+
+test("both expectation editors use a compact currency control and non-stretching correction badge", async () => {
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../web/styles.css", import.meta.url), "utf8");
+  for (const [start, end] of [["function renderExpectations(state)", "function renderComparison(state)"],
+    ["function renderFollowUp(state)", "function render(state)"]]) {
+    const renderer = source.slice(source.indexOf(start), source.indexOf(end));
+    assert.match(renderer, /class: "expectation-control"/);
+    assert.match(renderer, /class: "money-field"/);
+    assert.match(renderer, /class: "currency-prefix", "aria-hidden": "true"/);
+    assert.match(renderer, /class: "badge edited", hidden: true, "data-role": "edited"/);
+    assert.match(renderer, /row\.querySelector\("input"\)/);
+  }
+  assert.match(css, /\.expectation-control\s*\{[^}]*flex-wrap: wrap/);
+  assert.match(css, /\.money-field\s*\{[^}]*width: 10rem;[^}]*max-width: 100%/);
+  assert.match(css, /\.money-field:focus-within\s*\{[^}]*outline: 2px solid var\(--green\)/);
+  assert.match(css, /\.exp-row \.money-field input:focus-visible\s*\{ outline: none; \}/);
+  assert.match(css, /\.expectation-control \.badge\.edited\s*\{[^}]*flex: 0 0 auto/);
+});
+
+test("proposal provenance is prominent without claiming the suggestions are verified", async () => {
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../web/styles.css", import.meta.url), "utf8");
+  const renderer = source.slice(source.indexOf("function renderProposal(state)"), source.indexOf("function renderExpectations(state)"));
+  assert.ok(renderer.includes('el("strong", { class: "proposal-title" }, `${state.proposal.origin} proposal`)'));
+  assert.ok(renderer.includes('el("span", { class: "proposal-model" }, `From ${state.proposal.model}`)'));
+  assert.ok(renderer.includes("formatTokenUsage(state.proposal.usage.inputTokens)"));
+  assert.ok(renderer.includes("formatTokenUsage(state.proposal.usage.outputTokens)"));
+  assert.ok(renderer.includes("Suggested test cases. Review the expected totals before accepting."));
+  assert.ok(renderer.includes("This session carries retained initial evidence"));
+  assert.doesNotMatch(renderer, /557|2980|proposal PASS|verified proposal|defect found/i);
+  assert.match(css, /#propose-status\.good,\s*#regression-status\.good\s*\{[^}]*border-left: 5px solid var\(--green\)/);
+  assert.match(css, /\.proposal-title,\s*\.regression-verdict\s*\{[^}]*font-weight: 800/);
+});
+
+test("baseline PASS is a prominent bounded verdict using actual counts and exit status", async () => {
+  const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
+  const css = await readFile(new URL("../web/styles.css", import.meta.url), "utf8");
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const renderer = source.slice(source.indexOf("function renderBaseline(state)"), source.indexOf("function retainedOf(state)"));
+  const passing = renderer.slice(renderer.indexOf('if (state.baseline.status === "PASS")'), renderer.indexOf('state.baseline.status === "FAIL"'));
+  assert.match(passing, /el\("strong", \{ class: "baseline-verdict" \}, state\.baseline\.origin === "FIXTURE" \? "Scripted baseline PASS" : "Baseline PASS"\)/);
+  assert.ok(passing.includes("${counts.passed} of ${counts.tests} assertions passed"));
+  assert.ok(renderer.includes('${state.baseline.execution.exitCode === null ? "unknown" : state.baseline.execution.exitCode}'));
+  assert.ok(passing.includes("Existing baseline cases only."));
+  assert.doesNotMatch(passing, /6 of 6|production.ready|merge.approv/i);
+  assert.ok(renderer.includes("Baseline FAIL"));
+  assert.ok(renderer.includes("Baseline INCONCLUSIVE"));
+  assert.match(css, /#baseline-status\.good,\s*#propose-status\.good,\s*#regression-status\.good\s*\{[^}]*border-left: 5px solid var\(--green\)/);
+  assert.match(css, /\.baseline-verdict,\s*\.proposal-title,\s*\.regression-verdict\s*\{[^}]*font-weight: 800/);
+  assert.match(html, /id="baseline-status"[^>]*aria-atomic="true"/);
+  assert.match(passing, /el\("span", \{ class: "baseline-evidence mono" \}, executionSummary\)/,
+    "the actual execution summary belongs inside the PASS live-status card");
+  assert.ok(renderer.includes("origin ${state.baseline.origin}"));
+  assert.ok(renderer.includes("${describeCounts(state.baseline.execution.counts)}"));
+  assert.match(renderer, /if \(state\.baseline\.status !== "PASS"\) \{\s*nodes\.baselinePanel\.append\(el\("p", \{ class: "mono" \}, executionSummary\)\);/,
+    "only non-PASS states retain a separate metadata line; passing metadata is not duplicated");
+  assert.ok(renderer.includes('"Baseline test details"'));
+});
+
+test("baseline test details use one disclosure with directly labelled output, identities and limits", async () => {
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const renderer = source.slice(source.indexOf("function renderBaseline(state)"), source.indexOf("function retainedOf(state)"));
+  assert.equal([...renderer.matchAll(/el\("details"/g)].length, 1, "no nested baseline disclosure");
+  assert.match(renderer, /el\("summary", \{\}, "Baseline test details"\)/);
+  for (const heading of ["Standard output", "Standard error", "Source identities", "Scope and limits"]) {
+    assert.ok(renderer.includes(`el("h3", {}, "${heading}")`));
+  }
+  assert.ok(renderer.includes('state.baseline.execution.stdout || "(empty stdout)"'));
+  assert.ok(renderer.includes('state.baseline.execution.stderr || "(empty stderr)"'));
+  assert.ok(renderer.includes("state.baseline.sourceIdentities[key]"));
+  assert.ok(renderer.includes("for (const limit of state.baseline.limits)"));
+  assert.equal(renderer.includes('executionEvidence("Baseline"'), false);
+  assert.ok(source.includes("function executionEvidence(label, record)"), "other execution-detail renderers remain unchanged");
+});
+
+test("baseline action hides only after PASS, offers retry on failure and returns for a new change", async () => {
+  const initial = initialState();
+  assert.deepEqual(getBaselineButtonPresentation(initial), { hidden: false, label: "Run baseline tests" });
+  assert.deepEqual(getBaselineButtonPresentation({ ...initial, baseline: baselineBody() }),
+    { hidden: true, label: "Run baseline tests" });
+  for (const status of ["FAIL", "INCONCLUSIVE"]) {
+    assert.deepEqual(getBaselineButtonPresentation({ ...initial, baseline: { status } }),
+      { hidden: false, label: "Try again" });
+  }
+  const failed = { ...initial, errors: { ...initial.errors, baseline: "synthetic execution failure" } };
+  assert.deepEqual(getBaselineButtonPresentation(failed), { hidden: false, label: "Try again" });
+  const button = presentationButton();
+  presentPendingButton(button, getPendingPresentation("baseline"), getBaselineButtonPresentation(failed).label);
+  assert.equal(button.textContent, "Running baseline tests...");
+  assert.equal(button.disabled, true);
+  assert.equal(button.attributes["aria-busy"], "true");
+
+  const app = makeApp([() => respond(200, sessionBody()), () => respond(200, baselineBody())]);
+  await app.store.loadSession();
+  await app.store.runBaseline();
+  assert.equal(getBaselineButtonPresentation(app.store.getState()).hidden, true);
+  assert.deepEqual(app.store.selectChange("c"), { ok: true });
+  assert.deepEqual(getBaselineButtonPresentation(app.store.getState()),
+    { hidden: false, label: "Run baseline tests" });
+  assert.equal(app.calls.length, 2, "visibility and selection do not rerun a baseline or call the model");
+
+  const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  assert.ok(source.includes("nodes.baselineButton.hidden = getBaselineButtonPresentation(state).hidden"));
+  assert.ok(source.includes("getBaselineButtonPresentation(state).label : idleLabel"));
 });

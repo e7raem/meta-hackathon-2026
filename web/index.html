@@ -3,16 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Break This PR — find checkout bugs before release</title>
+  <title>Break This PR — Catch checkout bugs your tests missed</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
   <main id="app">
+    <aside id="fixture-banner" class="fixture-banner" hidden>
+      <strong>FIXTURE PREVIEW — no model calls or code execution</strong>
+      <span>Scripted results and inert downloads only. Reload starts a new walkthrough. The real live budget is never read or changed.</span>
+    </aside>
     <header class="masthead">
-      <p class="kicker">Break This PR · Prepared sample PR</p>
-      <h1>Find checkout bugs before release.</h1>
+      <p class="kicker">Break This PR <span>Prepared checkout review</span></p>
+      <h1>Catch checkout bugs your tests missed.</h1>
       <p class="lede">
-        Review a sample checkout rewrite, ask Muse for a missing basket, and keep the regression test.
+        The existing tests can pass while a checkout change charges the wrong amount.
+        Ask Muse for a case they missed, check its expected total, then run the code.
+        If it exposes a fault, keep the same test failing before the correction and passing after.
       </p>
       <p class="session-line">
         <span id="mode-badge" class="badge offline">NO SESSION</span>
@@ -22,9 +28,21 @@
       <p id="retained-banner" class="retained-banner" hidden></p>
     </header>
 
+    <nav class="review-path" aria-label="Review steps">
+      <a href="#stage-change" id="path-change" aria-current="step"><span>01</span> Check the change</a>
+      <a href="#stage-basket" id="path-basket"><span>02</span> Find a breaking basket</a>
+      <a href="#stage-test" id="path-test"><span>03</span> Keep the test</a>
+    </nav>
+    <div id="activity" class="activity" role="status" aria-live="polite" aria-atomic="true">
+      <strong id="activity-label">Opening the review</strong>
+      <p id="activity-detail">Reading the local session. No model request is made yet.</p>
+    </div>
+
     <ol class="journey">
       <li class="step" id="stage-change">
-        <h2>The code change</h2>
+        <p class="section-label">01 / The starting point</p>
+        <h2>Start with the tests that already exist</h2>
+        <p class="step-hint">Two prepared rewrites of the same checkout calculator. Both are meant to preserve the pricing rule below. We use Muse to look for a basket the existing tests missed, then run it to check the charge.</p>
         <p>
           <label for="change-selector">Prepared checkout change</label>
           <select id="change-selector" aria-describedby="change-selection-hint" disabled></select>
@@ -33,18 +51,20 @@
           Switching clears this review, not the shared session request budget or deadline.
         </p>
         <h3 id="pr-title" class="pr-title"></h3>
-        <p class="rule-summary">10% off eligible items, then one &pound;5 voucher if their discounted subtotal reaches &pound;100; full-price items stay unchanged.</p>
+        <p id="change-context" aria-live="polite" aria-atomic="true"></p>
+        <p class="rule-summary"><strong>Pricing rule (unchanged):</strong> 10% off eligible items, then one &pound;5 voucher if their discounted subtotal reaches &pound;100; full-price items stay unchanged.</p>
         <p class="step-hint">
           Run six checks: three ordinary baskets against both versions.
         </p>
         <button type="button" id="baseline-button" disabled>Run baseline tests</button>
-        <p id="baseline-status" class="status" role="status" aria-live="polite"></p>
+        <p id="baseline-status" class="status" role="status" aria-live="polite" aria-atomic="true"></p>
         <div id="baseline-panel" class="panel"></div>
         <div id="change-panel" class="change-detail"></div>
       </li>
 
       <li class="step" id="stage-basket">
-        <h2>The breaking basket</h2>
+        <p class="section-label">02 / The missing case</p>
+        <h2>Find what the green checks missed</h2>
         <p class="step-hint">
           Check Muse's expected totals against the rule before accepting and running its baskets.
         </p>
@@ -52,23 +72,29 @@
         <button type="button" id="propose-button" disabled>Ask Muse for breaking baskets</button>
         <p id="propose-status" class="status" role="status" aria-live="polite"></p>
         <div id="proposal-panel" class="panel"></div>
+        <section id="expectations-section" class="review-block" aria-labelledby="expectations-title" hidden>
+        <h3 id="expectations-title">Review the expected totals</h3>
         <div id="expectation-rows" class="expectation-rows"></div>
         <p class="review-confirm">
           <input type="checkbox" id="reviewed-checkbox" disabled>
           <label for="reviewed-checkbox">I checked each expected total against the written rule.</label>
         </p>
         <button type="button" id="accept-button" disabled>Accept expectations</button>
-        <p id="accept-status" class="status" role="status" aria-live="polite"></p>
+        <div id="accept-status" class="status" role="status" aria-live="polite" aria-atomic="true"></div>
         <div id="accepted-panel" class="panel"></div>
-        <button type="button" id="compare-button" disabled>Run comparison</button>
+        </section>
+        <section id="verification-section" class="review-block" aria-labelledby="verification-title" hidden>
+        <h3 id="verification-title">Does the proposed code charge the right amount?</h3>
+        <button type="button" id="compare-button" disabled>Check the actual charge</button>
         <p id="compare-status" class="status" role="status" aria-live="polite"></p>
         <div id="comparison-panel" class="panel"></div>
-        <button type="button" id="control-button" disabled>Check the corrected version (control)</button>
+        <button type="button" id="control-button" disabled>Compare with the pre-reviewed correction</button>
         <p id="control-status" class="status" role="status" aria-live="polite"></p>
         <div id="control-panel" class="panel"></div>
         <button type="button" id="feedback-button" disabled>Send verified results back to Muse (one request)</button>
         <p id="feedback-status" class="status" role="status" aria-live="polite"></p>
         <div id="feedback-panel" class="panel"></div>
+        </section>
         <section id="followup-section" class="followup" hidden aria-label="Follow-up basket from Muse feedback">
           <h3>Follow-up basket</h3>
           <p class="step-hint">
@@ -80,7 +106,7 @@
             <label for="followup-reviewed-checkbox">I checked each follow-up expected total against the written rule.</label>
           </p>
           <button type="button" id="followup-accept-button" disabled>Accept follow-up expectations</button>
-          <p id="followup-accept-status" class="status" role="status" aria-live="polite"></p>
+          <div id="followup-accept-status" class="status" role="status" aria-live="polite" aria-atomic="true"></div>
           <div id="followup-accepted-panel" class="panel"></div>
           <button type="button" id="followup-compare-button" disabled>Run follow-up comparison</button>
           <p id="followup-compare-status" class="status" role="status" aria-live="polite"></p>
@@ -92,7 +118,8 @@
       </li>
 
       <li class="step" id="stage-test">
-        <h2>The test to keep</h2>
+        <p class="section-label">03 / The useful result</p>
+        <h2>Keep the regression test</h2>
         <p class="step-hint">
           Keep the same test red on faulty code and green on the pre-reviewed correction.
         </p>

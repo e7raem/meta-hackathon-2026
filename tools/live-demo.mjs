@@ -11,6 +11,7 @@ import { isCart } from "./pricing-runner.mjs";
 export const ORIGIN = "http://127.0.0.1:48761";
 export const MAX_SESSION_MINUTES = 60;
 export const MAX_SESSION_REQUESTS = 6;
+export const MAX_RUNTIME_SOURCE_BYTES = 256 * 1024;
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[a-zA-Z0-9-]{8,80}$/;
@@ -748,11 +749,15 @@ const feedbackSchema = { type: "object", properties: {
   decision: { type: "string", enum: ["STOP", "PROPOSE_CASES"] }, cases: modelSchema.properties.cases,
 }, required: ["bindingId", "runId", "explanation", "observedFaultCaseIds", "decision", "cases"], additionalProperties: false };
 
+const moneyProseInstruction = "Format every monetary amount in rationale and explanation as pounds sterling with the pound sign and exactly two decimal places, not raw pence. "
+  + "Keep percentages and counts unchanged. JSON lines[].amount and expectedTotal must remain integer pence. ";
 const initialPrompt = "Propose at most three concrete cases to check this pricing change against the independently written rule. "
   + "The original is not a specification. Give an integer expected total from the rule, and a brief rationale. "
+  + moneyProseInstruction
   + "Do not return code, commands, a repair, or a general safety verdict. If no useful case can be identified return cases:[].\n";
 const feedbackPrompt = "This is ONE outcome-informed feedback turn, not fresh uncoached discovery. "
   + "The input contains reviewed cases and actual outputs from original, selected proposed change, and reviewed correction. "
+  + moneyProseInstruction
   + "Explain the specific observed fault in at most 600 characters; do not invent observations. "
   + "Echo bindingId and runId exactly. observedFaultCaseIds must equal the set of initialRows caseIds whose "
   + "original equals expectedTotal and candidate differs, with neither error. "
@@ -782,7 +787,7 @@ async function museStructuredRequest(keyFile, packet, deadline, prompt, schemaNa
   const input = prompt + JSON.stringify(packet);
   requireThat(Buffer.byteLength(input) <= 16384, "PACKET_TOO_LARGE");
   const body = JSON.stringify({ model: MODEL, input, store: false, stream: false, tools: [],
-    ...(schemaName === "pricing_feedback" ? { reasoning: { effort: "low" } } : {}),
+    reasoning: { effort: "low" },
     max_output_tokens: 4096, text: { format: { type: "json_schema", name: schemaName,
       strict: true, schema } } });
     return await new Promise((accept, reject) => {
@@ -935,7 +940,7 @@ export function createPricingVerification({ root, runDirectory, scopeId, sourceH
     for (const file of RUNTIME_FILES) {
       const expected = correctedScenario && file === `pricing/change-${correctedScenario}.ts`
         ? sourceHashes["pricing/change-b.ts"] : sourceHashes[file];
-      requireThat(sha(await readPrivate(join(copy, file), 131072)) === expected, "COPY_SOURCE_CHANGED", 503);
+      requireThat(sha(await readPrivate(join(copy, file), MAX_RUNTIME_SOURCE_BYTES)) === expected, "COPY_SOURCE_CHANGED", 503);
     }
   }
   async function makeCopy(parent, name, correctedScenario = null) {
@@ -1025,7 +1030,7 @@ async function digestFile(path, executable = false) {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = await file.stat();
-    requireThat(before.isFile() && before.size <= (executable ? 268435456 : 131072)
+    requireThat(before.isFile() && before.size <= (executable ? 268435456 : MAX_RUNTIME_SOURCE_BYTES)
       && (!executable || (before.mode & 0o111) !== 0 && (before.mode & 0o022) === 0),
     "PINNED_FILE_INVALID", 503);
     const hash = createHash("sha256"), buffer = Buffer.alloc(65536);
@@ -1199,7 +1204,7 @@ async function start() {
   const changes = [];
   for (const id of SCENARIO_IDS) {
     const candidateSource = await readFile(join(ROOT, "pricing/change-" + id + ".ts"), "utf8");
-    changes.push({ id, title: id === "a" ? "Simplify checkout pricing (A)" : "Consolidate checkout totals (C)",
+    changes.push({ id, title: id === "a" ? "Rework discounts and vouchers" : "Calculate totals in one pass",
       rule, originalSource, candidateSource,
       originalSha256: sha(originalSource), candidateSha256: sha(candidateSource),
       diff: "ORIGINAL\n" + originalSource + "\nPROPOSED\n" + candidateSource });

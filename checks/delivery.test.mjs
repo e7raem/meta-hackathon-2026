@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, writeFile, rm, readdir } from "node:fs/promis
 import { createHash, randomUUID } from "node:crypto";
 import { join, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RUNTIME_FILES, createLifecycle, createPricingVerification,
+import { RUNTIME_FILES, MAX_RUNTIME_SOURCE_BYTES, createLifecycle, createPricingVerification,
   runDeclaredVerification, parseTaskExecution, exportRegression, persistRegression, fixedRunner } from "../tools/live-demo.mjs";
 
 // Authored offline integration fixtures, never new Muse or customer evidence.
@@ -53,6 +53,29 @@ async function owned(operation, scenarioId = "a") {
     assert.deepEqual(await readdir(runDirectory), ["exports"], "only the frozen export remains; owned verification copies were removed");
   } finally { await rm(owner, { recursive: true, force: true }); }
 }
+
+test("private verification copies accept the source cap and refuse cap+1 before execution", async () => {
+  for (const extra of [0, 1]) {
+    await owned(async (input) => {
+      const bytes = Buffer.alloc(MAX_RUNTIME_SOURCE_BYTES + extra, 32);
+      await writeFile(join(input.root, "web/app.js"), bytes, { mode: 0o600 });
+      input.sourceHashes["web/app.js"] = sha(bytes);
+      let calls = 0;
+      const verification = createPricingVerification({ ...input, lifecycle: createLifecycle(),
+        execute: async () => {
+          calls++;
+          return parseTaskExecution({ exitCode: 0, stdout: tap({ tests: 6, passed: 6, failed: 0 }), stderr: "" });
+        } });
+      if (extra === 0) {
+        assert.equal((await verification.baseline()).status, "PASS");
+        assert.equal(calls, 1);
+      } else {
+        await assert.rejects(() => verification.baseline(), /PRIVATE_FILE_REQUIRED/);
+        assert.equal(calls, 0, "an oversized source is never handed to the execution callback");
+      }
+    });
+  }
+});
 
 test("TAP counts reject missing, duplicate and contradictory summaries", () => {
   assert.equal(parseTaskExecution({ exitCode: 1, stdout: tap(), stderr: "" }).counts.failed, 2);

@@ -109,6 +109,47 @@ export function describeChargeDifference(candidate, expected) {
   return "Matches the reviewed total.";
 }
 
+// Select observed evidence for presentation; never infer a fault from model prose.
+export function getFaultEvidence(comparison, acceptedCases, baseline = null, control = null) {
+  if (comparison?.status !== "REPRODUCED") return null;
+  const row = comparison.rows.find((entry) => {
+    const accepted = acceptedCases.find((item) => item.caseId === entry.caseId);
+    return accepted?.expectedTotal === entry.expectedTotal
+      && entry.original.error === null && entry.original.value === entry.expectedTotal
+      && entry.candidate.error === null && isValidExpectedTotal(entry.candidate.value)
+      && entry.candidate.value !== entry.expectedTotal;
+  });
+  if (!row) return null;
+  const accepted = acceptedCases.find((entry) => entry.caseId === row.caseId);
+  const baselineLinked = baseline?.status === "PASS"
+    && SHA256_PATTERN.test(comparison.sourceIdentities.original ?? "")
+    && SHA256_PATTERN.test(comparison.sourceIdentities.candidate ?? "")
+    && baseline.sourceIdentities.original === comparison.sourceIdentities.original
+    && baseline.sourceIdentities.candidate === comparison.sourceIdentities.candidate;
+  const basketKey = (lines) => JSON.stringify(lines.map((line) =>
+    [line.amount, line.discountEligible]).sort((a, b) => a[0] - b[0] || Number(a[1]) - Number(b[1])));
+  const absentFromBaseline = baselineLinked && !baseline.coverage.cases.some((entry) =>
+    basketKey(entry.lines) === basketKey(accepted.lines));
+  const controlBound = control && control.runId === comparison.runId
+    && control.acceptedId === comparison.acceptedId
+    && control.sourceIdentities.original === comparison.sourceIdentities.original
+    && (control.status === "NO_COUNTEREXAMPLE" || control.status === "REPRODUCED");
+  const correctedRow = controlBound ? control.rows.find((entry) =>
+    entry.caseId === row.caseId && entry.expectedTotal === row.expectedTotal
+    && entry.original.error === null && entry.original.value === row.expectedTotal
+    && entry.candidate.error === null && isValidExpectedTotal(entry.candidate.value)) : null;
+  return {
+    lines: accepted.lines,
+    expected: row.expectedTotal,
+    before: row.candidate.value,
+    after: correctedRow?.candidate.value ?? null,
+    controlAttempted: Boolean(control),
+    baselineLinked,
+    absentFromBaseline,
+    impact: describeChargeDifference(row.candidate.value, row.expectedTotal),
+  };
+}
+
 export function penceToPoundsString(pence) {
   if (!Number.isSafeInteger(pence) || pence < 0) return "";
   return `${Math.trunc(pence / 100)}.${String(pence % 100).padStart(2, "0")}`;
@@ -374,7 +415,7 @@ export function validateComparison(data, { retainedA = false } = {}) {
   return OK;
 }
 
-export function validateExport(data) {
+export function validateExport(data, { fixture = false } = {}) {
   if (!isPlainObject(data)) return fail("export payload must be an object");
   if (data.kind !== "export") return fail('export kind must be "export"');
   if (!ORIGINS.includes(data.origin)) return fail("export origin must be literal LIVE or FIXTURE");
@@ -384,7 +425,10 @@ export function validateExport(data) {
   if (!EXPORT_ID_PATTERN.test(data.exportId) || !textOk(data.runId, 200) || !SCENARIO_IDS.includes(data.scenarioId)) {
     return fail("export must identify its export, run and prepared scenario");
   }
-  if (typeof data.path !== "string" || data.path.match(EXPORT_PATH_PATTERN)?.[1] !== data.exportId) {
+  const fixtureExport = fixture && data.origin === "FIXTURE" && typeof data.path === "string" && data.path.startsWith("preview-memory/");
+  const expectedPath = fixtureExport ? `preview-memory/${data.exportId}/${EXPORT_FILENAME}` : null;
+  if (typeof data.path !== "string" || (fixtureExport
+    ? data.path !== expectedPath : data.path.match(EXPORT_PATH_PATTERN)?.[1] !== data.exportId)) {
     return fail("export path must identify the exact session-local export");
   }
   if (!textOk(data.testSource, 16384)) {
@@ -393,16 +437,16 @@ export function validateExport(data) {
   if (typeof data.sha256 !== "string" || !SHA256_PATTERN.test(data.sha256)) {
     return fail("export sha256 must be 64 lowercase hex characters");
   }
-  if (data.command !== EXPORT_COMMAND) {
+  if (data.command !== (fixtureExport ? "NOT_EXECUTED_FIXTURE" : EXPORT_COMMAND)) {
     return fail(`export command must be exactly "${EXPORT_COMMAND}"`);
   }
   return OK;
 }
 
-export function validateBaseline(data) {
+export function validateBaseline(data, { fixture = false } = {}) {
   if (!isPlainObject(data)) return fail("baseline payload must be an object");
   if (data.kind !== "baseline") return fail('baseline kind must be "baseline"');
-  if (data.origin !== LOCAL_EXECUTION) return fail("baseline origin must be LOCAL_EXECUTION");
+  if (data.origin !== LOCAL_EXECUTION && !(fixture && data.origin === "FIXTURE")) return fail("baseline origin must be LOCAL_EXECUTION, or FIXTURE in a fixture session");
   if (!SCENARIO_IDS.includes(data.changeId)) return fail("baseline changeId must be a or c");
   if (!BASELINE_STATUSES.includes(data.status)) {
     return fail("baseline status must be PASS, FAIL or INCONCLUSIVE");
@@ -436,10 +480,10 @@ export function validateBaseline(data) {
   return OK;
 }
 
-export function validateRegression(data) {
+export function validateRegression(data, { fixture = false } = {}) {
   if (!isPlainObject(data)) return fail("regression payload must be an object");
   if (data.kind !== "regression") return fail('regression kind must be "regression"');
-  if (data.origin !== LOCAL_EXECUTION) return fail("regression origin must be LOCAL_EXECUTION");
+  if (data.origin !== LOCAL_EXECUTION && !(fixture && data.origin === "FIXTURE")) return fail("regression origin must be LOCAL_EXECUTION, or FIXTURE in a fixture session");
   if (!textOk(data.runId, 200)) return fail("regression runId must be a non-empty string");
   if (!EXPORT_ID_PATTERN.test(data.exportId) || !SCENARIO_IDS.includes(data.scenarioId)) {
     return fail("regression must identify its export and prepared scenario");
@@ -490,11 +534,11 @@ export function validateRegression(data) {
  * pre-reviewed correct implementation B. A control is a bounded check on
  * those baskets, never whole-PR approval or a model-generated repair.
  */
-export function validateControl(data) {
+export function validateControl(data, { fixture = false } = {}) {
   if (!isPlainObject(data)) return fail("control payload must be an object");
   if (!validScenario(data)) return fail("control scenarioId must identify its prepared scenario");
   if (data.kind !== "control") return fail('control kind must be "control"');
-  if (data.origin !== LOCAL_EXECUTION) return fail("control origin must be LOCAL_EXECUTION");
+  if (data.origin !== LOCAL_EXECUTION && !(fixture && data.origin === "FIXTURE")) return fail("control origin must be LOCAL_EXECUTION, or FIXTURE in a fixture session");
   if (!textOk(data.controlId, 200)) return fail("control controlId must be a non-empty string");
   if (!textOk(data.runId, 200)) return fail("control runId must be a non-empty string");
   if (!textOk(data.acceptedId, 200)) return fail("control acceptedId must be a non-empty string");
@@ -632,6 +676,28 @@ function describeError(error) {
   return text.length > 500 ? `${text.slice(0, 500)}…` : text;
 }
 
+function captureAcceptanceFailure(error, submitted) {
+  return { code: typeof error?.code === "string" ? error.code : null,
+    submitted: submitted.map((entry) => ({ ...entry })) };
+}
+
+export function getAcceptanceFailurePresentation(failure) {
+  const rejected = ["EXPECTATION_RULE_MISMATCH", "FIXTURE_EXPECTATION_MISMATCH"].includes(failure?.code);
+  return {
+    rejected,
+    title: rejected ? "Expected total rejected" : "Acceptance not confirmed",
+    boundary: "Comparison blocked",
+    explanation: rejected
+      ? "The backend rejected one or more submitted expected totals. This is a review-input rejection, not a new checkout-code failure."
+      : "The app could not confirm acceptance. This does not establish that your totals are wrong.",
+    recovery: rejected
+      ? "Check the written pricing rule, edit the totals, tick the review box again, then accept."
+      : "Check the connection, session and details before retrying. Reload if acceptance may already have been recorded.",
+    submitted: (failure?.submitted ?? []).filter((entry) => isValidExpectedTotal(entry.expectedTotal))
+      .map((entry) => `${entry.caseId}: ${formatPence(entry.expectedTotal)}`).join("; "),
+  };
+}
+
 /*
  * API client. fetchImpl and randomId are injected so tests use a mocked
  * fetch and a deterministic requestId generator; the browser passes the
@@ -643,11 +709,13 @@ export function createApiClient({ fetchImpl, randomId }) {
     throw new TypeError("createApiClient requires fetchImpl and randomId functions");
   }
 
+  let sessionMode = null;
+  let fixtureToken = null;
   async function requestJson(path, { method, body, csrfToken }) {
     let response;
     try {
       if (method === "GET") {
-        response = await fetchImpl(path);
+        response = await fetchImpl(path, csrfToken ? { headers: { "X-Demo-Token": csrfToken } } : undefined);
       } else {
         response = await fetchImpl(path, {
           method: "POST",
@@ -679,13 +747,19 @@ export function createApiClient({ fetchImpl, randomId }) {
 
   function ensure(validation, data) {
     if (!validation.ok) throw apiError("invalid_shape", validation.error);
+    if (sessionMode === "LIVE" && data.origin === "FIXTURE") {
+      throw apiError("invalid_shape", "fixture evidence cannot enter a live session");
+    }
     return data;
   }
 
   return {
     async getSession() {
-      const data = await requestJson(API_PATHS.session, { method: "GET" });
-      return ensure(validateSession(data), data);
+      const data = await requestJson(API_PATHS.session, { method: "GET", csrfToken: fixtureToken });
+      ensure(validateSession(data), data);
+      sessionMode = data.mode;
+      fixtureToken = sessionMode === "FIXTURE" ? data.csrfToken : null;
+      return data;
     },
     async baseline({ csrfToken, changeId }) {
       const data = await requestJson(API_PATHS.baseline, {
@@ -693,7 +767,7 @@ export function createApiClient({ fetchImpl, randomId }) {
         csrfToken,
         body: { changeId },
       });
-      ensure(validateBaseline(data), data);
+      ensure(validateBaseline(data, { fixture: sessionMode === "FIXTURE" }), data);
       if (data.changeId !== changeId) throw apiError("invalid_shape", "baseline echoed a different changeId");
       return data;
     },
@@ -737,7 +811,7 @@ export function createApiClient({ fetchImpl, randomId }) {
         csrfToken,
         body: { runId },
       });
-      ensure(validateExport(data), data);
+      ensure(validateExport(data, { fixture: sessionMode === "FIXTURE" }), data);
       if (data.runId !== runId) throw apiError("invalid_shape", "export echoed a different runId");
       return data;
     },
@@ -747,7 +821,7 @@ export function createApiClient({ fetchImpl, randomId }) {
         csrfToken,
         body: { runId, exportId },
       });
-      ensure(validateRegression(data), data);
+      ensure(validateRegression(data, { fixture: sessionMode === "FIXTURE" }), data);
       if (data.runId !== runId || data.exportId !== exportId || data.scenarioId !== scenarioId) {
         throw apiError("invalid_shape", "regression echoed a different runId, exportId or scenarioId");
       }
@@ -759,7 +833,7 @@ export function createApiClient({ fetchImpl, randomId }) {
         csrfToken,
         body: { runId },
       });
-      ensure(validateControl(data), data);
+      ensure(validateControl(data, { fixture: sessionMode === "FIXTURE" }), data);
       if (data.runId !== runId) {
         throw apiError("invalid_shape", "control echoed a different runId");
       }
@@ -801,6 +875,7 @@ export function initialState() {
     expectations: {},
     reviewedConfirmed: false,
     accepted: null,
+    acceptanceFailure: null,
     comparison: null,
     exportResult: null,
     regression: null,
@@ -834,6 +909,7 @@ export function createStore({ client }) {
     state.comparison = null;
     state.exportResult = null;
     state.errors.accept = null;
+    state.acceptanceFailure = null;
     state.errors.compare = null;
     state.errors.export = null;
   }
@@ -848,6 +924,9 @@ export function createStore({ client }) {
   }
 
   function assertFreshRecord(record, parentKey, parentId) {
+    if (record.origin === "FIXTURE" && state.session?.mode !== "FIXTURE") {
+      throw apiError("invalid_shape", "fixture evidence cannot enter a live session");
+    }
     if (record.scenarioId !== state.selectedChangeId) {
       throw apiError("invalid_shape", "response scenarioId differs from the selected change");
     }
@@ -935,7 +1014,7 @@ export function createStore({ client }) {
     if (green.counts.skipped !== 0 || green.counts.cancelled !== 0) {
       return "green run skipped or cancelled tests";
     }
-    if (regression.cleanup.ownedCopiesRemoved !== true) {
+    if (regression.origin !== "FIXTURE" && regression.cleanup.ownedCopiesRemoved !== true) {
       return "backend did not confirm cleanup of its owned copies";
     }
     return null;
@@ -1048,6 +1127,9 @@ export function createStore({ client }) {
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
         if (baseline.changeId !== state.selectedChangeId) {
           throw apiError("invalid_shape", "baseline changeId differs from the selected change");
+        }
+        if (baseline.origin === "FIXTURE" && state.session.mode !== "FIXTURE") {
+          throw apiError("invalid_shape", "fixture baseline cannot enter a live session");
         }
         state.inFlight = null;
         state.baseline = baseline;
@@ -1162,15 +1244,14 @@ export function createStore({ client }) {
       const epoch = state.epoch;
       state.inFlight = "accept";
       state.errors.accept = null;
+      state.acceptanceFailure = null;
+      const submitted = entries.map(([caseId, entry]) => ({ caseId, expectedTotal: entry.value }));
       notify();
       try {
         const accepted = await client.accept({
           csrfToken: state.session.csrfToken,
           proposalId: state.proposal.proposalId,
-          expectations: entries.map(([caseId, entry]) => ({
-            caseId,
-            expectedTotal: entry.value,
-          })),
+          expectations: submitted,
         });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
         assertFreshRecord(accepted, "proposalId", state.proposal.proposalId);
@@ -1179,6 +1260,7 @@ export function createStore({ client }) {
         if (mismatch) {
           state.accepted = null;
           state.errors.accept = mismatch;
+          state.acceptanceFailure = captureAcceptanceFailure({ code: "invalid_shape" }, submitted);
           notify();
           return { ok: false, reason: "request_failed" };
         }
@@ -1190,6 +1272,7 @@ export function createStore({ client }) {
         state.inFlight = null;
         state.accepted = null;
         state.errors.accept = describeError(error);
+        state.acceptanceFailure = captureAcceptanceFailure(error, submitted);
         notify();
         return { ok: false, reason: "request_failed" };
       }
@@ -1422,6 +1505,7 @@ export function createStore({ client }) {
             expectations,
             reviewedConfirmed: false,
             accepted: null,
+            acceptanceFailure: null,
             comparison: null,
             control: null,
           };
@@ -1451,6 +1535,7 @@ export function createStore({ client }) {
       entry.edited = entry.value !== null && entry.value !== entry.proposed;
       state.followUp.reviewedConfirmed = false;
       state.errors.followUpAccept = null;
+      state.followUp.acceptanceFailure = null;
       notify();
       return { ok: true };
     },
@@ -1478,15 +1563,14 @@ export function createStore({ client }) {
       const epoch = state.epoch;
       state.inFlight = "followup_accept";
       state.errors.followUpAccept = null;
+      state.followUp.acceptanceFailure = null;
+      const submitted = entries.map(([caseId, entry]) => ({ caseId, expectedTotal: entry.value }));
       notify();
       try {
         const accepted = await client.accept({
           csrfToken: state.session.csrfToken,
           proposalId: state.followUp.proposal.proposalId,
-          expectations: entries.map(([caseId, entry]) => ({
-            caseId,
-            expectedTotal: entry.value,
-          })),
+          expectations: submitted,
         });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
         assertFreshRecord(accepted, "proposalId", state.followUp.proposal.proposalId);
@@ -1495,6 +1579,7 @@ export function createStore({ client }) {
         if (mismatch) {
           state.followUp.accepted = null;
           state.errors.followUpAccept = mismatch;
+          state.followUp.acceptanceFailure = captureAcceptanceFailure({ code: "invalid_shape" }, submitted);
           notify();
           return { ok: false, reason: "request_failed" };
         }
@@ -1504,7 +1589,10 @@ export function createStore({ client }) {
       } catch (error) {
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
         state.inFlight = null;
-        if (state.followUp) state.followUp.accepted = null;
+        if (state.followUp) {
+          state.followUp.accepted = null;
+          state.followUp.acceptanceFailure = captureAcceptanceFailure(error, submitted);
+        }
         state.errors.followUpAccept = describeError(error);
         notify();
         return { ok: false, reason: "request_failed" };
@@ -1622,6 +1710,123 @@ function setStatus(node, text, tone) {
   node.className = tone ? `status ${tone}` : "status";
 }
 
+function setAcceptanceStatus(node, text, tone) {
+  node.setAttribute("role", tone === "error" ? "alert" : "status");
+  node.setAttribute("aria-live", tone === "error" ? "assertive" : "polite");
+  node.setAttribute("aria-atomic", "true");
+  setStatus(node, text, tone);
+}
+
+function renderAcceptanceFailure(node, failure, detail) {
+  const view = getAcceptanceFailurePresentation(failure);
+  setAcceptanceStatus(node, "", "error");
+  node.classList.add("acceptance-rejection");
+  node.append(
+    el("strong", { class: "rejection-title" }, view.title),
+    el("strong", { class: "rejection-blocked" }, view.boundary),
+    el("span", {}, view.explanation),
+    ...(view.submitted ? [el("span", { class: "rejection-submitted" }, `Submitted expected totals: ${view.submitted}`)] : []),
+    el("span", { class: "rejection-recovery" }, view.recovery),
+    el("span", { class: "rejection-detail mono" }, `Details: ${detail}`),
+  );
+}
+
+function acceptedCasesList(accepted) {
+  const list = el("ul", { class: "accepted-list" });
+  for (const entry of accepted.acceptedCases) {
+    const corrected = entry.expectationOrigin === "REVIEWER_CORRECTED";
+    list.append(el("li", { class: "accepted-case" },
+      el("span", { class: "accepted-basket mono" }, describeLines(entry.lines)),
+      el("span", { class: "accepted-total-label" }, "Accepted expected total"),
+      el("strong", { class: "accepted-total-value" }, formatPence(entry.expectedTotal)),
+      el("span", { class: corrected ? "badge edited" : "badge meta" }, corrected ? "reviewer corrected"
+        : accepted.origin === "FIXTURE" ? "Scripted value, reviewer accepted" : "Muse value, reviewer accepted"),
+    ));
+  }
+  return list;
+}
+
+function renderAcceptanceSuccess(node, accepted, followUp = false) {
+  setAcceptanceStatus(node, "", "good");
+  node.classList.add("acceptance-success");
+  node.append(
+    el("strong", { class: "acceptance-title" }, followUp ? "Follow-up totals accepted" : "Expected totals accepted"),
+    el("strong", { class: "acceptance-locked" }, "Locked for comparison"),
+    el("span", { class: "acceptance-scope" }, accepted.origin === "FIXTURE"
+      ? "Scripted totals are locked for this walkthrough. No model or pricing code was run."
+      : "Reviewed expected totals are locked. Acceptance alone does not show that the checkout code is correct."),
+    acceptedCasesList(accepted),
+  );
+}
+
+const PENDING_ACTIONS = {
+  session: ["Opening the review...", "Reading the local session. No model request is made yet.", "change"],
+  baseline: ["Running baseline tests...", "Checking the existing baskets against both versions.", "change"],
+  propose: ["Asking Muse...", "Looking for missing baskets. You will review the expected totals before anything runs.", "basket"],
+  usage: ["Refreshing usage...", "Reading the durable request budget. This does not make a model call.", "basket"],
+  accept: ["Saving your review...", "Recording the expectations you checked against the written rule.", "basket"],
+  compare: ["Running comparison...", "Running the accepted baskets against the original and proposed code.", "basket"],
+  control: ["Checking the correction...", "Running those same baskets against the pre-reviewed corrected version.", "basket"],
+  feedback: ["Waiting for Muse's feedback...", "Muse is reviewing the verified outputs. This uses the single feedback request.", "basket"],
+  followup_accept: ["Saving follow-up review...", "Recording your independently reviewed follow-up expectations.", "basket"],
+  followup_compare: ["Comparing follow-up baskets...", "Running only the accepted follow-up baskets.", "basket"],
+  followup_control: ["Checking the follow-up control...", "Running the accepted follow-up baskets against the fixed correction.", "basket"],
+  export: ["Keeping the regression test...", "Persisting the test on the local backend. Nothing is executed in this browser.", "test"],
+  regression: ["Proving red, then green...", "Running identical exported test bytes against the faulty code and the pre-reviewed correction.", "test"],
+};
+
+const FIXTURE_ACTION_LABELS = {
+  "baseline-button": "Show scripted baseline", "propose-button": "Load scripted baskets",
+  "compare-button": "Show scripted charges", "control-button": "Show scripted correction",
+  "feedback-button": "Load scripted feedback", "export-button": "Prepare inert sample",
+  "regression-button": "Show scripted red → green",
+  "followup-compare-button": "Show scripted follow-up charges", "followup-control-button": "Show scripted follow-up correction",
+};
+
+export function getPendingPresentation(operation, slow = false, fixture = false) {
+  const action = Object.hasOwn(PENDING_ACTIONS, operation) ? PENDING_ACTIONS[operation] : null;
+  if (!action) return null;
+  const [label, detail, step] = action;
+  if (fixture) return { label: "Loading fixture...", detail: "Scripted preview only. No model calls or code execution.", step };
+  const model = operation === "propose" || operation === "feedback";
+  return {
+    label,
+    detail: slow
+      ? `${model ? "Still waiting for Muse" : "Still waiting for the local backend"}. No automatic retry is being made. Keep this page open. ${detail}`
+      : detail,
+    step,
+  };
+}
+
+export function presentPendingButton(button, presentation, idleLabel) {
+  button.textContent = presentation?.label ?? idleLabel;
+  button.setAttribute("aria-busy", presentation ? "true" : "false");
+  // Only the existing render guards may re-enable an action.
+  if (presentation) button.disabled = true;
+}
+
+export function getSessionUsageText(state) {
+  if (state.session?.mode === "FIXTURE") {
+    return `Fixture preview · ${state.session.callsUsed} of ${state.session.limit} scripted turns · no model calls; live budget unchanged`;
+  }
+  if (state.inFlight === "propose" || state.inFlight === "feedback") {
+    return "Muse is working; request usage updates when it finishes.";
+  }
+  if (state.inFlight === "usage") return "Refreshing request usage; no model call is made.";
+  const { callsUsed, limit } = state.session;
+  return state.budgetKnown
+    ? `${callsUsed} of ${limit} model requests used (last confirmed)`
+    : "Model usage unknown or pending; refresh before another request";
+}
+
+export function getBaselineButtonPresentation(state) {
+  return {
+    hidden: state.baseline?.status === "PASS",
+    label: state.errors.baseline || ["FAIL", "INCONCLUSIVE"].includes(state.baseline?.status)
+      ? "Try again" : "Run baseline tests",
+  };
+}
+
 function describeLines(lines) {
   return lines
     .map((line) => `${formatPence(line.amount)} ${line.discountEligible ? "eligible" : "not eligible"}`)
@@ -1684,6 +1889,42 @@ function comparisonTable(record, acceptedCases, candidateHeading) {
   return table;
 }
 
+function faultEvidenceCard(evidence, origin, retained = false) {
+  const title = evidence.absentFromBaseline
+    ? "The old tests passed. This basket exposed a wrong charge."
+    : "Execution caught an incorrect charge.";
+  const coverage = evidence.absentFromBaseline
+    ? "This basket was not among the three baseline examples. All six baseline checks passed on these same source versions."
+    : evidence.baselineLinked
+      ? "This basket also appears in the baseline examples. Review the conflicting evidence before claiming the baseline missed it."
+      : "The baseline has not been linked to these source versions. This result alone does not show what the old tests missed.";
+  const after = evidence.after === null
+    ? evidence.controlAttempted ? "Not established" : "Not checked yet"
+    : formatPence(evidence.after);
+  return el("section", { class: "fault-evidence", "aria-label": "Where the fault was caught" },
+    el("p", { class: "section-label" }, `${retained ? "RETAINED " : ""}${origin} · ${origin === "FIXTURE" ? "SCRIPTED COMPARISON" : "EXECUTED COMPARISON"}`),
+    el("h3", { class: "fault-title" }, title),
+    el("p", { class: "mono" }, describeLines(evidence.lines)),
+    el("dl", { class: "fault-amounts" },
+      el("div", {}, el("dt", {}, "Expected by the rule"), el("dd", {}, formatPence(evidence.expected))),
+      el("div", {}, el("dt", {}, "Before · proposed code"), el("dd", { class: "bad" }, formatPence(evidence.before))),
+      el("div", {}, el("dt", {}, "After · pre-reviewed correction"),
+        el("dd", { class: evidence.after === null ? "" : evidence.after === evidence.expected ? "good" : "bad" }, after)),
+    ),
+    el("p", { class: "fault-impact" }, evidence.impact),
+    el("p", {}, coverage),
+    el("p", { class: "fineprint" },
+      "The original code matched the reviewed expectation. The proposed code did not. "
+      + (evidence.after === null
+        ? "Run the corrected-version control to establish the after result."
+        : evidence.after === evidence.expected
+          ? "The pre-reviewed correction matched it on this basket; this is not a Muse-generated repair."
+          : "The pre-reviewed correction still differs on this basket; the correction is not established.")),
+    retained ? el("p", { class: "fineprint" },
+      "The before result is retained evidence, not a fresh execution or a new model discovery.") : "",
+  );
+}
+
 function startBrowserApp() {
   const client = createApiClient({
     fetchImpl: (...args) => window.fetch(...args),
@@ -1693,11 +1934,13 @@ function startBrowserApp() {
 
   const byId = (id) => document.getElementById(id);
   const nodes = {
+    fixtureBanner: byId("fixture-banner"),
     modeBadge: byId("mode-badge"),
     sessionMeta: byId("session-meta"),
     sessionError: byId("session-error"),
     changeSelector: byId("change-selector"),
     prTitle: byId("pr-title"),
+    changeContext: byId("change-context"),
     changePanel: byId("change-panel"),
     baselineButton: byId("baseline-button"),
     baselineStatus: byId("baseline-status"),
@@ -1739,7 +1982,29 @@ function startBrowserApp() {
     followupControlButton: byId("followup-control-button"),
     followupControlStatus: byId("followup-control-status"),
     followupControlPanel: byId("followup-control-panel"),
+    expectationsSection: byId("expectations-section"),
+    verificationSection: byId("verification-section"),
+    activity: byId("activity"),
+    activityLabel: byId("activity-label"),
+    activityDetail: byId("activity-detail"),
   };
+
+  const actionButtons = [
+    [nodes.baselineButton, ["baseline"]],
+    [nodes.proposeButton, ["propose", "usage"]],
+    [nodes.acceptButton, ["accept"]],
+    [nodes.compareButton, ["compare"]],
+    [nodes.controlButton, ["control"]],
+    [nodes.feedbackButton, ["feedback", "usage"]],
+    [nodes.followupAcceptButton, ["followup_accept"]],
+    [nodes.followupCompareButton, ["followup_compare"]],
+    [nodes.followupControlButton, ["followup_control"]],
+    [nodes.exportButton, ["export"]],
+    [nodes.regressionButton, ["regression"]],
+  ].map(([button, operations]) => ({ button, operations, idleLabel: button.textContent }));
+  let activityKey = null;
+  let patienceTimer = null;
+  let slowOperation = false;
 
   let renderedSessionToken = null;
   let renderedProposalId = null;
@@ -1747,6 +2012,7 @@ function startBrowserApp() {
   let renderedFollowUpId = null;
 
   function renderSession(state) {
+    nodes.fixtureBanner.hidden = state.session?.mode !== "FIXTURE";
     if (state.inFlight === "session") {
       nodes.modeBadge.textContent = "LOADING";
       nodes.modeBadge.className = "badge offline";
@@ -1763,13 +2029,10 @@ function startBrowserApp() {
       nodes.sessionError.textContent = state.errors.session ?? "";
       return;
     }
-    const { mode, callsUsed, limit, deadline } = state.session;
+    const { mode, deadline } = state.session;
     nodes.modeBadge.textContent = mode;
     nodes.modeBadge.className = mode === "LIVE" ? "badge live" : "badge fixture";
-    nodes.sessionMeta.textContent =
-      state.budgetKnown
-        ? `${callsUsed} of ${limit} model requests used (last confirmed)`
-        : "Model usage unknown or pending; refresh before another request";
+    nodes.sessionMeta.textContent = getSessionUsageText(state);
     nodes.sessionMeta.title = `Session deadline ${deadline}`;
     nodes.sessionError.hidden = true;
   }
@@ -1799,6 +2062,11 @@ function startBrowserApp() {
     clear(nodes.changePanel);
     const change = getSelectedChange(state);
     nodes.prTitle.textContent = change?.title ?? "";
+    nodes.changeContext.textContent = change?.id === "a"
+      ? "Changes how eligible-item subtotals, the 10% discount and the £5 voucher are combined into the final charge."
+      : change?.id === "c"
+        ? "Replaces separate passes over eligible and full-price items with a single loop that accumulates both totals."
+        : "";
     if (!state.session) return;
     for (const entry of state.session.changes) {
       nodes.changeSelector.append(el("option", { value: entry.id }, entry.title));
@@ -1818,14 +2086,14 @@ function startBrowserApp() {
     }
     nodes.changePanel.append(
       el("details", {},
+        el("summary", {}, "View proposed code changes (read-only)"),
+        el("pre", { class: "diff" }, change.diff),
+      ),
+      el("details", {},
         el("summary", {}, "Full rule and input units"),
         el("p", { class: "rule-text" }, change.rule.text),
         el("p", {}, "Raw code and tests use pence: 10000 = £100."),
         el("p", { class: "rule-domain" }, `Input domain: ${change.rule.domain}`),
-      ),
-      el("details", { open: true },
-        el("summary", {}, "The proposed change (read-only diff)"),
-        el("pre", { class: "diff" }, change.diff),
       ),
       el("details", {},
         el("summary", {}, "Baseline coverage: three baskets × two versions"),
@@ -1848,19 +2116,32 @@ function startBrowserApp() {
   }
 
   function renderBaseline(state) {
+    nodes.baselineButton.hidden = getBaselineButtonPresentation(state).hidden;
     nodes.baselineButton.disabled =
       !state.session || Boolean(state.inFlight) || Boolean(state.proposal)
       || (state.baseline !== null && state.baseline.status === "PASS");
+    const executionSummary = state.baseline
+      ? `origin ${state.baseline.origin} · exit ${state.baseline.execution.exitCode === null ? "unknown" : state.baseline.execution.exitCode}`
+        + ` · ${describeCounts(state.baseline.execution.counts)}`
+      : "";
     if (state.inFlight === "baseline") {
-      setStatus(nodes.baselineStatus, "Running the six baseline assertions against both versions…", "pending");
+      setStatus(nodes.baselineStatus, state.session?.mode === "FIXTURE"
+        ? "Loading scripted baseline counts. No tests are run." : "Running the six baseline assertions against both versions…", "pending");
     } else if (state.errors.baseline) {
       setStatus(nodes.baselineStatus, `Baseline run failed: ${state.errors.baseline}`, "error");
     } else if (state.baseline) {
       const counts = state.baseline.execution.counts;
       if (state.baseline.status === "PASS") {
-        setStatus(nodes.baselineStatus,
-          `Baseline PASS — exit ${state.baseline.execution.exitCode}, `
-          + `${counts.passed} of ${counts.tests} assertions passed on original and candidate.`, "good");
+        setStatus(nodes.baselineStatus, "", "good");
+        nodes.baselineStatus.append(
+          el("strong", { class: "baseline-verdict" }, state.baseline.origin === "FIXTURE" ? "Scripted baseline PASS" : "Baseline PASS"),
+          el("span", { class: "baseline-score" }, `${counts.passed} of ${counts.tests} assertions passed`),
+          el("span", { class: "baseline-scope" },
+            state.baseline.origin === "FIXTURE"
+              ? "Scripted counts for visual review only. No tests or pricing code were executed."
+              : "Original and candidate. Existing baseline cases only. A green baseline does not prove every charge is correct."),
+          el("span", { class: "baseline-evidence mono" }, executionSummary),
+        );
       } else if (state.baseline.status === "FAIL") {
         setStatus(nodes.baselineStatus,
           "Baseline FAIL — the existing assertions already disagree. Fix that before asking Muse.", "bad");
@@ -1880,14 +2161,19 @@ function startBrowserApp() {
     }
     const limits = el("ul", { class: "limits" });
     for (const limit of state.baseline.limits) limits.append(el("li", {}, limit));
+    if (state.baseline.status !== "PASS") {
+      nodes.baselinePanel.append(el("p", { class: "mono" }, executionSummary));
+    }
     nodes.baselinePanel.append(
-      el("p", { class: "mono" },
-        `origin ${state.baseline.origin} · exit ${state.baseline.execution.exitCode === null ? "unknown" : state.baseline.execution.exitCode}`
-        + ` · ${describeCounts(state.baseline.execution.counts)}`),
       el("details", {},
-        el("summary", {}, "Evidence: logs, identities and limits"),
-        executionEvidence("Baseline", state.baseline.execution),
+        el("summary", {}, "Baseline test details"),
+        el("h3", {}, "Standard output"),
+        el("pre", { class: "log" }, state.baseline.execution.stdout || "(empty stdout)"),
+        el("h3", {}, "Standard error"),
+        el("pre", { class: "log" }, state.baseline.execution.stderr || "(empty stderr)"),
+        el("h3", {}, "Source identities"),
         identities,
+        el("h3", {}, "Scope and limits"),
         limits,
       ),
     );
@@ -1915,9 +2201,11 @@ function startBrowserApp() {
       return;
     }
     if (state.inFlight === "propose") {
-      setStatus(nodes.proposeStatus, "Asking Muse for baskets that could break this change…", "pending");
+      setStatus(nodes.proposeStatus, state.session?.mode === "FIXTURE"
+        ? "Loading authored baskets. No model request is made." : "Asking Muse for baskets that could break this change…", "pending");
     } else if (state.inFlight === "usage") {
-      setStatus(nodes.proposeStatus, "Reading the durable budget; no model call…", "pending");
+      setStatus(nodes.proposeStatus, state.session?.mode === "FIXTURE"
+        ? "Reading the fixture walkthrough state; the live budget is untouched." : "Reading the durable budget; no model call…", "pending");
     } else if (state.errors.propose) {
       if (state.errors.propose === NO_CASES_MESSAGE) {
         setStatus(nodes.proposeStatus, state.errors.propose, "warn");
@@ -1925,11 +2213,15 @@ function startBrowserApp() {
         setStatus(nodes.proposeStatus, `Proposal failed and was not retried: ${state.errors.propose}`, "error");
       }
     } else if (state.proposal) {
-      setStatus(
-        nodes.proposeStatus,
-        `${state.proposal.origin} proposal from ${state.proposal.model} · ` +
-        `${formatTokenUsage(state.proposal.usage.inputTokens)} in / ${formatTokenUsage(state.proposal.usage.outputTokens)} out tokens`,
-        "good",
+      setStatus(nodes.proposeStatus, "", "good");
+      nodes.proposeStatus.append(
+        el("strong", { class: "proposal-title" }, `${state.proposal.origin} proposal`),
+        el("span", { class: "proposal-model" }, `From ${state.proposal.model}`),
+        el("span", { class: "proposal-usage mono" },
+          `${formatTokenUsage(state.proposal.usage.inputTokens)} in / ${formatTokenUsage(state.proposal.usage.outputTokens)} out tokens`),
+        el("span", { class: "proposal-scope" }, state.proposal.origin === "FIXTURE"
+          ? "Authored fixture cases, not model discoveries. Review the scripted expected totals to continue."
+          : "Suggested test cases. Review the expected totals before accepting."),
       );
     } else if (state.session && !state.budgetKnown) {
       setStatus(nodes.proposeStatus, "A prior call may have consumed budget. Refresh usage before another model request.", "warn");
@@ -1947,7 +2239,9 @@ function startBrowserApp() {
       list.append(
         el("li", {},
           el("p", { class: "case-lines mono" }, describeLines(entry.lines)),
-          el("p", { class: "case-expected" }, `Proposed expected total: ${formatPence(entry.expectedTotal)}`),
+          el("p", { class: "case-expected" },
+            el("span", { class: "case-expected-label" }, "Proposed expected total"),
+            el("strong", { class: "case-expected-value" }, formatPence(entry.expectedTotal))),
           el("p", { class: "case-rationale" }, entry.rationale),
         ),
       );
@@ -1977,8 +2271,11 @@ function startBrowserApp() {
             el("div", { class: "exp-row" },
               el("label", { for: `exp-${entry.id}` },
                 `Expected total in pounds for ${describeLines(entry.lines)}`),
-              input,
-              el("span", { class: "badge edited", hidden: true, "data-role": "edited" }, "reviewer corrected"),
+              el("div", { class: "expectation-control" },
+                el("div", { class: "money-field" },
+                  el("span", { class: "currency-prefix", "aria-hidden": "true" }, "£"), input),
+                el("span", { class: "badge edited", hidden: true, "data-role": "edited" }, "Edited, not verified"),
+              ),
               el("span", { class: "hint", hidden: true, "data-role": "hint" },
                 "Enter pounds with at most two decimals, between £0.00 and £4000.00."),
             ),
@@ -1992,7 +2289,7 @@ function startBrowserApp() {
       const entry = state.expectations[caseId];
       if (!entry) continue;
       input.disabled = Boolean(state.inFlight) || Boolean(state.accepted);
-      row.querySelector('[data-role="edited"]').hidden = !entry.edited;
+      row.querySelector('[data-role="edited"]').hidden = !entry.edited || Boolean(state.accepted);
       row.querySelector('[data-role="hint"]').hidden = entry.value !== null;
     }
     nodes.reviewedCheckbox.disabled = !state.proposal || Boolean(state.inFlight) || Boolean(state.accepted);
@@ -2003,30 +2300,17 @@ function startBrowserApp() {
       || !state.reviewedConfirmed
       || expectationEntries.some((entry) => entry.value === null);
     if (state.inFlight === "accept") {
-      setStatus(nodes.acceptStatus, "Recording the reviewed expectations…", "pending");
+      setAcceptanceStatus(nodes.acceptStatus, "Recording the reviewed expectations…", "pending");
     } else if (state.errors.accept) {
-      setStatus(nodes.acceptStatus, `Acceptance failed: ${state.errors.accept}`, "error");
+      renderAcceptanceFailure(nodes.acceptStatus, state.acceptanceFailure, state.errors.accept);
     } else if (state.accepted) {
-      setStatus(nodes.acceptStatus, "Reviewed expectations locked before this proposed-case comparison.", "good");
+      renderAcceptanceSuccess(nodes.acceptStatus, state.accepted);
     } else {
-      setStatus(nodes.acceptStatus, "", null);
+      setAcceptanceStatus(nodes.acceptStatus, "", null);
     }
     clear(nodes.acceptedPanel);
     if (!state.accepted) return;
-    const list = el("ul", { class: "accepted-list" });
-    for (const entry of state.accepted.acceptedCases) {
-      list.append(
-        el("li", {},
-          el("span", { class: "mono" }, describeLines(entry.lines)),
-          el("span", {}, ` → expected ${formatPence(entry.expectedTotal)} `),
-          el("span", {
-            class: entry.expectationOrigin === "REVIEWER_CORRECTED" ? "badge edited" : "badge meta",
-          }, entry.expectationOrigin === "REVIEWER_CORRECTED" ? "reviewer corrected" : "Muse value, reviewer accepted"),
-        ),
-      );
-    }
-    nodes.acceptedPanel.append(
-      list,
+    nodes.acceptStatus.append(
       el("p", { class: "fineprint" },
         "Acceptance records the reviewer's declaration in this session. " +
         "A reviewer declaration is an operator decision, not an attestation of any human's identity."),
@@ -2034,24 +2318,29 @@ function startBrowserApp() {
   }
 
   function renderComparison(state) {
+    const evidence = state.comparison && state.accepted
+      ? getFaultEvidence(state.comparison, state.accepted.acceptedCases, state.baseline, state.control) : null;
     nodes.compareButton.disabled =
       !state.accepted || Boolean(state.inFlight) || Boolean(state.comparison);
     if (state.inFlight === "compare") {
-      setStatus(nodes.compareStatus, "Comparing original and candidate on the backend…", "pending");
+      setStatus(nodes.compareStatus, state.session?.mode === "FIXTURE"
+        ? "Loading scripted before/after charges. No pricing code is run." : "Comparing original and candidate on the backend…", "pending");
     } else if (state.errors.compare) {
       setStatus(nodes.compareStatus,
         `Comparison failed — treat the result as inconclusive: ${state.errors.compare}`, "error");
     } else if (state.comparison) {
       const status = state.comparison.status;
-      if (status === "REPRODUCED") {
+      if (status === "REPRODUCED" && evidence) {
         setStatus(nodes.compareStatus,
-          "REPRODUCED — at least one accepted case distinguishes candidate from expectation.", "bad");
+          state.comparison.origin === "FIXTURE"
+            ? "REPRODUCED — scripted fixture shows an incorrect charge. No pricing code was executed."
+            : "REPRODUCED — execution exposed an incorrect charge on a reviewed basket.", "bad");
       } else if (status === "NO_COUNTEREXAMPLE") {
         setStatus(nodes.compareStatus,
-          "NO_COUNTEREXAMPLE — these cases found no difference. That is not proof of correctness.", "warn");
+          "NO_COUNTEREXAMPLE — these baskets did not expose an incorrect charge. That is not proof the change is correct.", "warn");
       } else {
         setStatus(nodes.compareStatus,
-          "INCONCLUSIVE — the backend could not establish an outcome for these cases.", "warn");
+          "INCONCLUSIVE — the available results do not establish a reliable pricing fault.", "warn");
       }
     } else {
       setStatus(nodes.compareStatus, "", null);
@@ -2071,6 +2360,7 @@ function startBrowserApp() {
       el("p", { class: "fineprint" },
         `origin ${state.comparison.origin} · run ${state.comparison.runId} · ` +
         "expectations came from the rule, not from the original implementation"),
+      ...(evidence ? [faultEvidenceCard(evidence, state.comparison.origin)] : []),
       table,
       el("details", {},
         el("summary", {}, "Evidence: source identities and limits"),
@@ -2086,11 +2376,14 @@ function startBrowserApp() {
     nodes.exportButton.disabled =
       !reproduced || state.baseline?.status !== "PASS" || Boolean(state.inFlight) || Boolean(state.exportResult);
     if (state.inFlight === "export") {
-      setStatus(nodes.exportStatus, "Asking the backend to persist the regression test…", "pending");
+      setStatus(nodes.exportStatus, state.session?.mode === "FIXTURE"
+        ? "Preparing an inert sample in preview memory only." : "Asking the backend to persist the regression test…", "pending");
     } else if (state.errors.export) {
       setStatus(nodes.exportStatus, `Export failed: ${state.errors.export}`, "error");
     } else if (state.exportResult) {
-      setStatus(nodes.exportStatus, "Regression test persisted by the server. Shown as text; never executed here.", "good");
+      setStatus(nodes.exportStatus, state.exportResult.origin === "FIXTURE"
+        ? "Inert fixture sample ready. Nothing was persisted or executed."
+        : "Regression test persisted by the server. Shown as text; never executed here.", "good");
     } else if (comparison && !reproduced) {
       setStatus(nodes.exportStatus,
         "Only a REPRODUCED counterexample is worth keeping as a regression test.", null);
@@ -2100,7 +2393,8 @@ function startBrowserApp() {
     clear(nodes.exportPanel);
     if (!state.exportResult) return;
     const exported = state.exportResult;
-    const download = el("button", { type: "button", class: "download" }, `Download ${exported.filename}`);
+    const download = el("button", { type: "button", class: "download" },
+      exported.origin === "FIXTURE" ? "Download inert fixture sample" : `Download ${exported.filename}`);
     download.addEventListener("click", () => {
       const blob = new Blob([exported.testSource], { type: "text/plain" });
       const url = URL.createObjectURL(blob);
@@ -2110,6 +2404,15 @@ function startBrowserApp() {
       anchor.remove();
       setTimeout(() => URL.revokeObjectURL(url), 0);
     });
+    if (exported.origin === "FIXTURE") {
+      nodes.exportPanel.append(
+        el("p", {}, "This is an inert sample held in preview memory, not a persisted or executable regression test. Downloading it does not run anything."),
+        el("p", { class: "fineprint mono" }, `sha256 ${exported.sha256} · FIXTURE`),
+        download,
+        el("details", {}, el("summary", {}, "Inert sample contents"), el("pre", { class: "test-source" }, exported.testSource)),
+      );
+      return;
+    }
     nodes.exportPanel.append(
       el("p", {},
         `The server persisted this test at ${exported.path}. ` +
@@ -2129,13 +2432,22 @@ function startBrowserApp() {
       !state.exportResult || Boolean(state.inFlight) || Boolean(state.regression);
     if (state.inFlight === "regression") {
       setStatus(nodes.regressionStatus,
-        "Running the same exported test against the faulty source, then the pre-reviewed correction…", "pending");
+        state.session?.mode === "FIXTURE" ? "Loading scripted red/green counts. No regression test is executed."
+          : "Running the same exported test against the faulty source, then the pre-reviewed correction…", "pending");
     } else if (state.errors.regression) {
       setStatus(nodes.regressionStatus, `Regression proof failed: ${state.errors.regression}`, "error");
     } else if (state.regression) {
-      if (state.regression.status === "RED_THEN_GREEN") {
-        setStatus(nodes.regressionStatus,
-          "RED then GREEN — the same test failed on the faulty source and passed on the pre-reviewed correction.", "good");
+      if (state.regression.status === "RED_THEN_GREEN"
+        && state.regression.sameTest === true && state.regression.testSha256 === state.exportResult?.sha256) {
+        setStatus(nodes.regressionStatus, "", "good");
+        nodes.regressionStatus.append(
+          el("strong", { class: "regression-verdict" }, state.regression.origin === "FIXTURE"
+            ? "Scripted example: red before, green after." : "Same test: fails before, passes after."),
+          el("span", { class: "baseline-scope" },
+            state.regression.origin === "FIXTURE" ? "Fixture outcomes only. No regression test or correction was executed."
+              : "RED then GREEN — the same test failed on the faulty source and passed on the pre-reviewed correction. "
+                + "This is the regression test to keep, not whole-project approval."),
+        );
       } else {
         setStatus(nodes.regressionStatus,
           "INCONCLUSIVE — this run did not prove the regression red-to-green. It is not green proof.", "warn");
@@ -2186,15 +2498,17 @@ function startBrowserApp() {
           ? "The test identity was unchanged between the red and green runs."
           : "Warning: the test identity could not be matched to the exported test."),
       el("p", { class: "fineprint" },
-        `Correction used: ${regression.correction.label} — a pre-reviewed prepared correction, not a Muse-generated fix. ` +
-        `Owned copies cleaned up: ${regression.cleanup.ownedCopiesRemoved ? "yes" : "no"}.`),
+        regression.origin === "FIXTURE" ? "Scripted correction only. No source copies were created or cleaned up."
+          : `Correction used: ${regression.correction.label} — a pre-reviewed prepared correction, not a Muse-generated fix. ` +
+            `Owned copies cleaned up: ${regression.cleanup.ownedCopiesRemoved ? "yes" : "no"}.`),
       evidence,
     );
   }
 
   function renderRetained(state) {
     const retained = retainedOf(state);
-    const token = retained && state.session ? state.session.csrfToken : null;
+    const token = retained && state.session
+      ? `${state.session.csrfToken}:${state.baseline?.status}:${state.control?.controlId}` : null;
     nodes.retainedBanner.hidden = !retained;
     if (!retained) {
       nodes.retainedBanner.textContent = "";
@@ -2213,10 +2527,12 @@ function startBrowserApp() {
       hashes.append(el("dt", {}, `${key} projection sha256`),
         el("dd", { class: "mono" }, retained.recordHashes[key]));
     }
+    const evidence = getFaultEvidence(retained.comparison, retained.accepted.acceptedCases, state.baseline, state.control);
     nodes.retainedPanel.append(
       el("p", {},
         `Retained initial result: ${retained.comparison.status} on `
         + `${retained.accepted.acceptedCases.length} reviewed basket(s), recorded ${retained.recordedAt}.`),
+      ...(evidence ? [faultEvidenceCard(evidence, retained.comparison.origin, true)] : []),
       comparisonTable(retained.comparison, retained.accepted.acceptedCases, "Candidate"),
       el("p", { class: "fineprint" },
         "These are stored records from the earlier live run. Run a fresh baseline, then the "
@@ -2239,7 +2555,8 @@ function startBrowserApp() {
       || Boolean(state.inFlight) || Boolean(state.control);
     if (state.inFlight === "control") {
       setStatus(nodes.controlStatus,
-        "Running the same accepted baskets against the fixed pre-reviewed correct version…", "pending");
+        state.session?.mode === "FIXTURE" ? "Loading scripted correction amounts. No pricing code is run."
+          : "Running the same accepted baskets against the fixed pre-reviewed correct version…", "pending");
     } else if (state.errors.control) {
       setStatus(nodes.controlStatus, `Control run failed: ${state.errors.control}`, "error");
     } else if (state.control) {
@@ -2294,7 +2611,8 @@ function startBrowserApp() {
         && (state.feedbackAttempted || state.session.callsUsed >= state.session.limit));
     if (state.inFlight === "feedback") {
       setStatus(nodes.feedbackStatus,
-        "Sending the verified comparison and control outputs back to Muse…", "pending");
+        state.session?.mode === "FIXTURE" ? "Loading authored feedback. No model request is made."
+          : "Sending the verified comparison and control outputs back to Muse…", "pending");
     } else if (state.inFlight === "usage") {
       setStatus(nodes.feedbackStatus, "Reading the durable budget; no model call…", "pending");
     } else if (state.errors.feedback) {
@@ -2304,10 +2622,13 @@ function startBrowserApp() {
     } else if (state.feedback) {
       if (state.feedback.status === "FOLLOW_UP_PROPOSED") {
         setStatus(nodes.feedbackStatus,
-          "Muse proposed follow-up baskets. Review their totals independently below before anything runs.", "good");
+          state.feedback.origin === "FIXTURE"
+            ? "Authored fixture follow-up baskets are ready. Review their scripted totals below; no model or code runs."
+            : "Muse proposed follow-up baskets. Review their totals independently below before anything runs.", "good");
       } else if (state.feedback.status === "STOPPED") {
         setStatus(nodes.feedbackStatus,
-          "Muse stopped here with no follow-up case. A stop is a valid outcome, not approval.", null);
+          state.feedback.origin === "FIXTURE" ? "The authored fixture stops here. No model was called."
+            : "Muse stopped here with no follow-up case. A stop is a valid outcome, not approval.", null);
       } else {
         setStatus(nodes.feedbackStatus,
           "Feedback INCONCLUSIVE — no finding was manufactured from it.", "warn");
@@ -2330,7 +2651,8 @@ function startBrowserApp() {
       el("p", { class: "fineprint" },
         `origin ${feedback.origin} · ${formatTokenUsage(feedback.usage.inputTokens)} in / `
         + `${formatTokenUsage(feedback.usage.outputTokens)} out tokens · `
-        + "the explanation is a model interpretation of verified outputs — not authority or proof"),
+        + (feedback.origin === "FIXTURE" ? "authored fixture wording, not a model interpretation or execution proof"
+          : "the explanation is a model interpretation of verified outputs — not authority or proof")),
       el("blockquote", { class: "explanation" }, feedback.explanation),
       el("details", {},
         el("summary", {}, "Evidence: feedback identities and limits"),
@@ -2380,8 +2702,11 @@ function startBrowserApp() {
             el("p", { class: "case-rationale" }, entry.rationale),
             el("label", { for: `fexp-${entry.id}` },
               `Expected total in pounds for ${describeLines(entry.lines)}`),
-            input,
-            el("span", { class: "badge edited", hidden: true, "data-role": "edited" }, "reviewer corrected"),
+            el("div", { class: "expectation-control" },
+              el("div", { class: "money-field" },
+                el("span", { class: "currency-prefix", "aria-hidden": "true" }, "£"), input),
+              el("span", { class: "badge edited", hidden: true, "data-role": "edited" }, "Edited, not verified"),
+            ),
             el("span", { class: "hint", hidden: true, "data-role": "hint" },
               "Enter pounds with at most two decimals, between £0.00 and £4000.00."),
           ),
@@ -2394,7 +2719,7 @@ function startBrowserApp() {
       const entry = followUp.expectations[caseId];
       if (!entry) continue;
       input.disabled = Boolean(state.inFlight) || Boolean(followUp.accepted);
-      row.querySelector('[data-role="edited"]').hidden = !entry.edited;
+      row.querySelector('[data-role="edited"]').hidden = !entry.edited || Boolean(followUp.accepted);
       row.querySelector('[data-role="hint"]').hidden = entry.value !== null;
     }
     nodes.followupReviewedCheckbox.disabled = Boolean(state.inFlight) || Boolean(followUp.accepted);
@@ -2405,36 +2730,21 @@ function startBrowserApp() {
       || !followUp.reviewedConfirmed
       || expectationEntries.some((entry) => entry.value === null);
     if (state.inFlight === "followup_accept") {
-      setStatus(nodes.followupAcceptStatus, "Recording the reviewed follow-up expectations…", "pending");
+      setAcceptanceStatus(nodes.followupAcceptStatus, "Recording the reviewed follow-up expectations…", "pending");
     } else if (state.errors.followUpAccept) {
-      setStatus(nodes.followupAcceptStatus, `Follow-up acceptance failed: ${state.errors.followUpAccept}`, "error");
+      renderAcceptanceFailure(nodes.followupAcceptStatus, followUp.acceptanceFailure, state.errors.followUpAccept);
     } else if (followUp.accepted) {
-      setStatus(nodes.followupAcceptStatus,
-        "Follow-up expectations reviewed and locked before any comparison.", "good");
+      renderAcceptanceSuccess(nodes.followupAcceptStatus, followUp.accepted, true);
     } else {
-      setStatus(nodes.followupAcceptStatus,
+      setAcceptanceStatus(nodes.followupAcceptStatus,
         "Review these expectations against the written rule, independently of any earlier result.", null);
     }
     clear(nodes.followupAcceptedPanel);
-    if (followUp.accepted) {
-      const list = el("ul", { class: "accepted-list" });
-      for (const entry of followUp.accepted.acceptedCases) {
-        list.append(
-          el("li", {},
-            el("span", { class: "mono" }, describeLines(entry.lines)),
-            el("span", {}, ` → expected ${formatPence(entry.expectedTotal)} `),
-            el("span", {
-              class: entry.expectationOrigin === "REVIEWER_CORRECTED" ? "badge edited" : "badge meta",
-            }, entry.expectationOrigin === "REVIEWER_CORRECTED" ? "reviewer corrected" : "Muse value, reviewer accepted"),
-          ),
-        );
-      }
-      nodes.followupAcceptedPanel.append(list);
-    }
     nodes.followupCompareButton.disabled =
       !followUp.accepted || Boolean(state.inFlight) || Boolean(followUp.comparison);
     if (state.inFlight === "followup_compare") {
-      setStatus(nodes.followupCompareStatus, "Comparing original and candidate on the follow-up basket…", "pending");
+      setStatus(nodes.followupCompareStatus, state.session?.mode === "FIXTURE"
+        ? "Loading scripted follow-up charges. No pricing code is run." : "Comparing original and candidate on the follow-up basket…", "pending");
     } else if (state.errors.followUpCompare) {
       setStatus(nodes.followupCompareStatus,
         `Follow-up comparison failed — treat it as inconclusive: ${state.errors.followUpCompare}`, "error");
@@ -2465,7 +2775,8 @@ function startBrowserApp() {
       !followUp.comparison || Boolean(state.inFlight) || Boolean(followUp.control);
     if (state.inFlight === "followup_control") {
       setStatus(nodes.followupControlStatus,
-        "Running the follow-up basket against the fixed pre-reviewed correct version…", "pending");
+        state.session?.mode === "FIXTURE" ? "Loading scripted follow-up correction. No pricing code is run."
+          : "Running the follow-up basket against the fixed pre-reviewed correct version…", "pending");
     } else if (state.errors.followUpControl) {
       setStatus(nodes.followupControlStatus,
         `Follow-up control failed: ${state.errors.followUpControl}`, "error");
@@ -2507,6 +2818,71 @@ function startBrowserApp() {
     renderControl(state);
     renderFeedback(state);
     renderFollowUp(state);
+    renderActivity(state);
+  }
+
+  function renderActivity(state) {
+    nodes.expectationsSection.hidden = !state.proposal?.cases.length;
+    nodes.verificationSection.hidden = !state.accepted && !retainedOf(state);
+    const key = state.inFlight ? `${state.epoch}:${state.inFlight}` : null;
+    if (key !== activityKey) {
+      clearTimeout(patienceTimer);
+      activityKey = key;
+      slowOperation = false;
+      if (key) {
+        patienceTimer = setTimeout(() => {
+          const current = store.getState();
+          if (`${current.epoch}:${current.inFlight}` !== key) return;
+          slowOperation = true;
+          renderActivity(current);
+        }, 8000);
+      }
+    }
+    const fixture = state.session?.mode === "FIXTURE";
+    const pending = getPendingPresentation(state.inFlight, slowOperation, fixture);
+    for (const { button, operations, idleLabel } of actionButtons) {
+      const usageButton = button === nodes.proposeButton || button === nodes.feedbackButton;
+      const label = fixture ? FIXTURE_ACTION_LABELS[button.id] ?? idleLabel
+        : button === nodes.baselineButton ? getBaselineButtonPresentation(state).label : idleLabel;
+      presentPendingButton(button, operations.includes(state.inFlight) ? pending : null,
+        usageButton && !state.budgetKnown ? fixture ? "Refresh fixture state" : "Refresh usage (no model call)" : label);
+      button.dataset.nextAction = "false";
+    }
+    const needsReview = (state.proposal?.cases.length && !state.accepted)
+      || (state.followUp?.proposal.cases.length && !state.followUp.accepted);
+    const next = actionButtons.find(({ button }) => !button.disabled && !button.closest("[hidden]"))?.button;
+    const error = Object.values(state.errors).find(Boolean);
+    let step = pending?.step ?? (needsReview ? "basket" : "change");
+    nodes.activity.dataset.pending = pending ? "true" : "false";
+    nodes.activity.dataset.error = !pending && error ? "true" : "false";
+    if (pending) {
+      nodes.activityLabel.textContent = pending.label;
+      nodes.activityDetail.textContent = pending.detail;
+    } else if (error) {
+      nodes.activityLabel.textContent = "This step needs attention";
+      nodes.activityDetail.textContent = error;
+    } else if (needsReview && next !== nodes.acceptButton && next !== nodes.followupAcceptButton) {
+      nodes.activityLabel.textContent = "Next: review the expected totals";
+      nodes.activityDetail.textContent = "Check each basket against the rule, then confirm your review before accepting.";
+    } else if (next) {
+      next.dataset.nextAction = "true";
+      nodes.activityLabel.textContent = `Next: ${next.textContent}`;
+      nodes.activityDetail.textContent = next === nodes.baselineButton
+        ? fixture ? "Start the scripted baseline to unlock the authored fixture baskets. No tests or model calls are made."
+          : "Start with the existing tests. Muse becomes available after a passing baseline."
+        : "The highlighted action is ready. Evidence and earlier results remain available below.";
+      step = next.closest(".step").id.replace("stage-", "");
+    } else {
+      nodes.activityLabel.textContent = state.session ? "Review the evidence" : "Review backend unavailable";
+      nodes.activityDetail.textContent = state.session
+        ? "Inspect the results below, or select another prepared change. These checks do not approve a merge."
+        : "Start the local backend and reload. No results are simulated here.";
+    }
+    for (const name of ["change", "basket", "test"]) {
+      const path = byId(`path-${name}`);
+      if (name === step) path.setAttribute("aria-current", "step");
+      else path.removeAttribute("aria-current");
+    }
   }
 
   nodes.changeSelector.addEventListener("change", () => {
