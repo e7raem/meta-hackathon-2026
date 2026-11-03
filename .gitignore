@@ -4,3 +4,4 @@ evidence/
 .ota/contracts/
 .ota/receipts/
 .ota/proof/
+/.idea/*
