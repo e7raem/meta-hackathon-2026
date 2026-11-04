@@ -8,7 +8,7 @@ import { EventEmitter } from "node:events";
 import { BudgetLedger, initializeBudget, persistRegression, createController, checkRequest,
   buildRunnerEnvironment, exportRegression, ruleTotal, createLifecycle, museProposal, closeProviderRequests,
   feedbackContext, feedbackFromResponse, validateRetainedCheckpoint, loadRetainedCheckpoint,
-  createFeedbackAttempts, museFeedback, prepareSession, loadOwnerSession,
+  createFeedbackAttempts, museFeedback, prepareSession, prepareRecording, loadOwnerSession,
   validateSessionWindow, startupHint, exportArtifactPath, RUNTIME_FILES, MAX_RUNTIME_SOURCE_BYTES, ORIGIN } from "../tools/live-demo.mjs";
 
 // All providers/runners/reviewer decisions in this file are synthetic offline fixtures.
@@ -223,6 +223,49 @@ test("same-test regression requires a reproduced export and never accepts caller
   assert.equal(f.calls.regressions[0].expectedTests, 1); assert.equal(f.calls.regressions[0].expectedFailures, 1);
   assert.equal(f.calls.provider, 1, "red-green does not make a second model request");
   await assert.rejects(() => f.controller.action("/api/regression", { runId: run.runId, exportId: exported.exportId, requestId: "repeat-regression" }), /REGRESSION_ALREADY_RUN/);
+});
+
+test("repair binds the exported test to one reserved provider call and never retries", async () => {
+  const candidateSource = await readFile(new URL("../pricing/change-a.ts", import.meta.url), "utf8");
+  let requests = 0;
+  const change = { id: "a", originalSource: "original", candidateSource, rule: { text: "Synthetic rule" },
+    originalSha256: "a".repeat(64), candidateSha256: sha(candidateSource) };
+  const f = await fixture({
+    changes: [change],
+    verification: {
+      baseline: async () => ({ status: "PASS", cleanup: { ownedCopiesRemoved: true },
+        execution: { exitCode: 0, counts: { tests: 6, passed: 6, failed: 0, skipped: 0, cancelled: 0 } } }),
+      regression: async (input) => {
+        assert.equal(f.calls.reservations, 1);
+        const patch = await input.proposeRepair();
+        assert.match(patch.after, /eligibleTotal >= 10000/);
+        return { testSha256: input.testSha256, status: "INCONCLUSIVE" };
+      },
+    },
+    repairProvider: async (packet) => {
+      requests++;
+      assert.equal(f.calls.reservations, 2);
+      assert.equal(packet.testSha256, sha(f.calls.exports[0]));
+      assert.equal(packet.proposedSource, candidateSource);
+      assert.equal(packet.observedCases.length, 1);
+      return { status: "completed", model: "muse-spark-1.3", output: [{ type: "message", content: [{
+        type: "output_text", text: JSON.stringify({ testSha256: packet.testSha256, eligibleTotal: "eligibleSubtotal * 9 / 10",
+          voucherBasis: "eligibleTotal", cartTotal: "eligibleTotal + ineligibleTotal - voucher", explanation: "Synthetic patch." }),
+      }] }] };
+    },
+  });
+  const { result } = await accepted(f.controller);
+  const run = await f.controller.action("/api/compare", { acceptedId: result.acceptedId, requestId: "repair-compare" });
+  await assert.rejects(() => f.controller.action("/api/regression", { runId: run.runId, exportId: EXPORT_ID,
+    requestId: "repair-without-test", repair: true }), /REPRODUCED_EXPORT_REQUIRED/);
+  assert.equal(requests, 0);
+  const exported = await f.controller.action("/api/export", { runId: run.runId, requestId: "repair-export" });
+  const body = { runId: run.runId, exportId: exported.exportId, requestId: "request-repair", repair: true };
+  const resultProof = await f.controller.action("/api/regression", body);
+  assert.equal(resultProof.callsUsed, 2);
+  assert.equal(resultProof.testSha256, exported.sha256);
+  await assert.rejects(() => f.controller.action("/api/regression", { ...body, requestId: "repeat-repair" }), /REGRESSION_ALREADY_RUN/);
+  assert.equal(requests, 1);
 });
 
 test("C keeps selected baseline, source and scenario binding through export, control, feedback and regression", async () => {
@@ -891,6 +934,24 @@ async function sessionFixture(operation) {
     assert.equal(await readFile(key, "utf8"), "fake-only-not-a-real-credential");
   });
 }
+
+test("recording defaults create a fresh 20-minute scope with two unused requests", async () => {
+  await sessionFixture(async ({ root, ota }) => {
+    const home = join(root, "../owner");
+    const config = join(home, ".config/meta-hackathon-2026");
+    const key = join(config, "model-api-key");
+    await mkdir(config, { recursive: true, mode: 0o700 });
+    await writeFile(key, "fake-only-not-a-real-credential", { mode: 0o600 });
+    const first = await prepareRecording({ root, home, otaExecutable: ota });
+    const second = await prepareRecording({ root, home, otaExecutable: ota });
+    assert.notEqual(first.approvalFile, second.approvalFile);
+    const { approval, ledger } = await loadOwnerSession({ root, approvalFile: first.approvalFile });
+    assert.equal(approval.keyFile, key);
+    assert.equal(approval.requestLimit, 2);
+    assert.equal(Date.parse(approval.deadline) - Date.parse(approval.issuedAt), 20 * 60 * 1000);
+    assert.deepEqual((await ledger.ready()).reservations, []);
+  });
+});
 
 test("fresh explicit session preparation auto-pins sources/binaries, creates a private V2 pair and does not run anything", async () => {
   await sessionFixture(async ({ environment, node, ota, prepare, load }) => {

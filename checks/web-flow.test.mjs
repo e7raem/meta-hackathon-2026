@@ -593,12 +593,12 @@ test("an edited expectation echoed back as META_ACCEPTED is rejected, not relabe
   assert.match(store.getState().errors.accept, /origin/);
 });
 
-async function appAtAccepted(extraPlan) {
+async function appAtAccepted(extraPlan, mode = "FIXTURE") {
   const app = makeApp([
-    () => respond(200, sessionBody()),
+    () => respond(200, sessionBody({ mode })),
     () => respond(200, baselineBody()),
-    () => respond(200, proposalBody()),
-    () => respond(200, acceptedBody()),
+    () => respond(200, proposalBody({ origin: mode })),
+    () => respond(200, acceptedBody({ origin: mode })),
     ...extraPlan,
   ]);
   await app.store.loadSession();
@@ -744,6 +744,31 @@ test("a claimed RED_THEN_GREEN without matching evidence is rejected, never show
   ]);
   assert.equal((await wrongExport.store.runRegression()).ok, false);
   assert.equal(wrongExport.store.getState().regression, null);
+});
+
+test("live A requests one repair for the retained export and reflects its budget", async () => {
+  let finish;
+  const response = new Promise((resolve) => { finish = resolve; });
+  const app = await appAtAccepted([
+    () => respond(200, comparisonBody({ status: "REPRODUCED", origin: "LIVE" })),
+    () => respond(200, exportBody({ origin: "LIVE" })),
+    () => response,
+  ], "LIVE");
+  await app.store.compare();
+  await app.store.exportTest();
+  const pending = app.store.runRegression(true);
+  assert.equal(app.store.getState().inFlight, "repair");
+  assert.equal(app.store.getState().budgetKnown, false);
+  const last = app.calls.at(-1);
+  assert.equal(last.url, API_PATHS.regression);
+  assert.equal(JSON.parse(last.options.body).repair, true);
+  finish(respond(200, regressionBody({ callsUsed: 2, baseline: executionRecord(),
+    correction: { ...regressionBody().correction, kind: "MUSE_PROPOSED",
+      before: "old expression", after: "new expression", explanation: "A bounded repair." } })));
+  assert.deepEqual(await pending, { ok: true });
+  assert.equal(app.store.getState().session.callsUsed, 2);
+  assert.equal(app.store.getState().budgetKnown, true);
+  assert.equal(app.store.getState().regression.correction.kind, "MUSE_PROPOSED");
 });
 
 test("budget refresh refuses a different nonce or regressed count rather than adopting or resetting it", async () => {
@@ -957,6 +982,14 @@ test("validators reject out-of-domain and coerced data instead of accepting trut
     },
   })).ok, false, "only the pre-reviewed fixed correction kind is accepted");
   assert.equal(validateRegression(regressionBody({ cleanup: {} })).ok, false);
+  const repair = regressionBody({ callsUsed: 2, baseline: executionRecord(),
+    correction: { ...regressionBody().correction, kind: "MUSE_PROPOSED",
+      before: "old expression", after: "new expression", explanation: "A bounded repair." } });
+  assert.equal(validateRegression(repair).ok, true);
+  assert.equal(validateRegression({ ...repair, baseline: null }).ok, false);
+  assert.equal(validateRegression({ ...repair, callsUsed: null }).ok, false);
+  assert.equal(validateRegression({ ...repair, scenarioId: "c" }).ok, false);
+  assert.equal(validateRegression({ ...repair, origin: "FIXTURE" }, { fixture: true }).ok, false);
 
   assert.equal(validateProposal(proposalBody()).ok, true);
   const base = proposalBody().cases[0];
@@ -1902,7 +1935,10 @@ function presentationButton() {
 test("every async store operation has a stage-specific accessible pending presentation", async () => {
   const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
   const operations = new Set([...source.matchAll(/state\.inFlight = "([a-z_]+)"/g)].map((match) => match[1]));
-  assert.equal(operations.size, 13);
+  for (const match of source.matchAll(/state\.inFlight = \w+ \? "([a-z_]+)" : "([a-z_]+)"/g)) {
+    operations.add(match[1]); operations.add(match[2]);
+  }
+  assert.equal(operations.size, 14);
   for (const operation of operations) {
     const presentation = getPendingPresentation(operation);
     assert.ok(presentation, operation);
@@ -2000,7 +2036,7 @@ test("long-response patience text stays presentation-only and never promises pro
 
 test("session usage does not suggest refreshing during an active model request", () => {
   const state = { ...initialState(), session: sessionBody({ mode: "LIVE", callsUsed: 1, limit: 4 }), budgetKnown: false };
-  for (const inFlight of ["propose", "feedback"]) {
+  for (const inFlight of ["propose", "feedback", "repair"]) {
     const text = getSessionUsageText({ ...state, inFlight });
     assert.equal(text, "Muse is working; request usage updates when it finishes.");
     assert.doesNotMatch(text, /refresh|used \(last confirmed\)/i);

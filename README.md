@@ -9,6 +9,20 @@ expected totals, then a fixed runner reproduces the defect. The result is a
 regression test that fails on the faulty code and passes on a reviewed correction,
 not just another review comment.
 
+## Quick Start
+
+From the checkout root, choose one Ota task:
+
+| What you want | Command |
+| --- | --- |
+| Explore the app without an API key or model calls | `ota run demo:preview --agent` |
+| Record the live Muse demo | `ota run demo:record --agent` |
+
+Open [the app](http://127.0.0.1:48761/) when Ota reports readiness. Both modes
+use the same port, so stop one with Ctrl-C before starting the other. If you're
+recording, start the app off camera and open the video on the checkout review.
+See [one-time setup](#one-time-setup) and [what to change](#what-to-change) below.
+
 ## The Problem
 
 A pricing change can pass its tests and still charge customers the wrong amount.
@@ -39,12 +53,13 @@ add full-price items unchanged. The faulty refactor changes that order.
 3. **Reproduce the defect.** Compare the original and proposed prices. Run the
    same baskets against a correct refactor to check that the test distinguishes
    the faulty change from the reviewed correction.
-4. **Give Muse the results.** One feedback turn explains the observed failures
+4. **Give Muse the results (optional).** One feedback turn explains the observed failures
    and can stop or suggest up to two additional baskets for separate review.
-5. **Keep the test.** Export a regression test and run its identical contents
-   against the faulty and corrected code: failing before the fix, passing after.
-
-The correction is supplied and reviewed in advance; Muse does not write the fix.
+5. **Test a fix and keep the regression.** In A, lock the test and prove it fails
+   before asking Muse for a patch. The runner builds the patch from allowlisted
+   pricing expressions and checks the identical regression test plus the six
+   original assertions in disposable copies. Review the diff before applying
+   anything. C and the no-model walkthrough use a pre-reviewed correction.
 
 ### Two Prepared Changes
 
@@ -74,8 +89,9 @@ failure rather than speculate about one.
 
 The model's answer is a hypothesis, not the verdict. Expected totals are checked
 independently, and Node runs the comparison and regression tests. Muse cannot
-issue shell commands or execute generated code through this workflow. Both model
-turns use low reasoning effort within the fixed 4,096-output-token limit.
+issue shell commands or supply arbitrary code. The optional A repair changes only
+three pricing statements via a closed expression list, and never edits the checkout.
+Model calls use low reasoning effort within the fixed 4,096-output-token limit.
 
 In A's verified live run on 28 October, Muse proposed the three baskets above.
 The original and reviewed correction matched their expected totals; the faulty
@@ -88,34 +104,68 @@ feedback proposed two further baskets, which were checked and run without findin
 another defect. That run predates the latest feedback-effort adjustment. These
 are recorded prepared-example runs, not a measured success rate across real PRs.
 
-## Run The Tests
+## Run The App
 
-### Reloadable No-Model Preview
+### One-Time Setup
+
+Use the reference setup: **macOS on Apple Silicon, Node.js 24.22.1 and
+[Ota](https://github.com/ota-run/ota) 1.6.28**. No npm dependencies are needed.
+Preview uses the Node executable on `PATH`; it has been checked on Node 24.22.1
+and 26.5.0. For live recording, keep Node 24.22.1 and released Ota 1.6.28 on
+`PATH`, or point the local `node` and `ota` executables or symlinks in
+`$HOME/.config/meta-hackathon-2026/` to those binaries. The recording task
+prefers those local entries; the outer `ota` command still needs to be on `PATH`.
+
+For live mode only, confirm your Meta credits and put the API key in
+`$HOME/.config/meta-hackathon-2026/model-api-key`, outside the checkout. The key
+must be a regular file you own, not a symlink, with mode `600`. Do not put it
+in a command, browser code, recording or committed file.
+
+### Preview vs. Live
+
+- **Preview** is a reloadable, authored walkthrough of both examples. Its
+  **FIXTURE** labels mean no model request, pricing execution or real test run.
+  Downloaded samples are inert. Run `ota run verify:preview --agent` to check
+  the preview's isolation and flow.
+- **Live** starts a fresh 20-minute session with two Muse requests. Startup
+  makes none. In A, use the two requests to find a breaking basket and propose
+  a patch; skip optional feedback. Running the baseline, comparing charges
+  and running the pre-reviewed control use no model requests. The local
+  request limit is not a provider billing cap.
+
+### What To Change
+
+| Setting | Where to change it |
+| --- | --- |
+| Meta key | Replace the private `model-api-key` file for the next session. For a different file path, use `META_DEMO_KEY_FILE` with the explicit tasks below. |
+| Local Node or Ota binary | Update the local `node` or `ota` entry described above, or select the qualified version on `PATH`. |
+| Session length or request count | Set `META_DEMO_SESSION_MINUTES` (1-60) and `META_DEMO_REQUEST_LIMIT` (1-6) for a **new** session using the explicit tasks below. To change the shortcut's defaults for everyone, edit `prepareRecording()` in [`tools/live-demo.mjs`](tools/live-demo.mjs) and keep the contract, docs and tests aligned. |
+| Port | Currently fixed at `127.0.0.1:48761`. A code change must keep the surface and task bindings in [`ota.yaml`](ota.yaml), the listener and origin/Host checks in [`tools/live-demo.mjs`](tools/live-demo.mjs), and the preview listener in [`tools/fixture-preview.mjs`](tools/fixture-preview.mjs) aligned. |
+| Pricing rule or example | Edit [`pricing/rule.json`](pricing/rule.json) or the corresponding [implementation and baseline](pricing/), then rerun verification. Preview's authored cases live in [`fixtures/preview.json`](fixtures/preview.json). |
+
+For custom live settings, use the qualified binaries on `PATH`. Example: a
+30-minute session with three requests, including optional feedback.
 
 ```sh
-ota run demo:preview --agent
+export META_DEMO_KEY_FILE="$HOME/.config/meta-hackathon-2026/model-api-key"
+export META_DEMO_OTA_EXECUTABLE="$(command -v ota)"
+export META_DEMO_SESSION_MINUTES=30
+export META_DEMO_REQUEST_LIMIT=3
+export META_DEMO_APPROVAL_FILE="$(pwd -P)/evidence/live/custom-$(date -u +%Y%m%dT%H%M%SZ)/approval.json"
+ota run demo:live:budget --agent && ota run demo:live --agent
 ```
 
-Open <http://127.0.0.1:48761/>. The same UI now supports a complete, reloadable
-walkthrough of both prepared scenarios, including review, before/after results,
-scripted feedback and follow-up, an inert download, and scripted red/green counts.
-Every result is labelled **FIXTURE**: no model, pricing code or test is executed.
-The server never reads a credential, live approval or live budget and never writes
-evidence. Its temporary scripted-turn counter is not model consumption. Reloading
-starts a fresh fixture walkthrough; ordinary state refresh preserves that
-walkthrough. Wrong expected totals are refused rather than changing canned
-results to match. Downloads contain comments only, not executable tests.
+Ota's live tasks retain the private approval, budget and evidence under ignored
+`evidence/live/`. Preparation pins the sources and the Node/Ota binaries.
+Create a new session after a source or binary change, or when the session
+expires; don't edit or reuse the old approval or reset its budget.
 
-The server serves only fixed web assets and bounded loopback API routes. Stop it
-with Ctrl-C before starting the live demo on the same port. This mode is for
-interface review, not evidence of a model discovery, execution or regression proof.
-Run `ota run verify:preview --agent` for its isolation and full-flow checks.
+Exports are saved under the session's `exports/<export-id>/regression.test.mjs`.
+The app runs identical test bytes in disposable copies through `verify:export`.
+A downloaded test is not a standalone checkout; use the app's regression
+action to see the paired red/green proof.
 
-### Offline Checks
-
-The reference environment is **macOS on Apple Silicon, Node.js 24.22.1 and
-[Ota](https://github.com/ota-run/ota) 1.6.28**. The contract requires that Node
-version and uses existing tools; there are no npm dependencies to install.
+## Run The Tests
 
 ```sh
 git clone https://github.com/e7raem/meta-hackathon-2026.git
@@ -149,57 +199,6 @@ ota run verify:live-mvp --agent
 This also tests the controller and runs real nested Ota tasks in temporary
 copies to verify the unchanged-test failure/pass sequence. Model responses in
 the offline suite are fixtures, not fresh Muse results.
-
-### Interactive Demo
-
-The local UI uses your Meta account. First save your API key in a private file
-**outside this checkout**, such as `$HOME/.config/meta-hackathon-2026/model-api-key`,
-with owner-only permissions (`chmod 600` on that file). Do not put the key in
-source, a shell command, browser code or a committed environment file.
-
-With the same qualified Node/Ota prerequisites, prepare a new session and start it:
-
-```sh
-export META_DEMO_KEY_FILE="$HOME/.config/meta-hackathon-2026/model-api-key"
-export META_DEMO_OTA_EXECUTABLE="$(command -v ota)"
-export META_DEMO_SESSION_MINUTES=20
-export META_DEMO_REQUEST_LIMIT=2
-export META_DEMO_APPROVAL_FILE="$(pwd -P)/evidence/live/recording-$(date -u +%Y%m%dT%H%M%SZ)/approval.json"
-
-ota run demo:live:budget --agent
-ota run demo:live --agent
-```
-
-Open **http://127.0.0.1:48761** after Ota reports readiness. Startup makes no model
-request: use the UI to run the baseline, ask Muse, review expected totals and
-compare. Two requests allow one initial proposal and one feedback turn; native
-baseline, comparison, control and regression checks do not consume model requests.
-The limit is shared across both examples. Set it to four if you want one proposal
-and one feedback turn for each example.
-Press Ctrl-C to stop. The service also stops at its recorded session deadline.
-
-Preparation creates a private approval and ledger under ignored `evidence/live/`,
-automatically recording the current sources and Node/Ota executable hashes. No
-manual hash list is needed. Choose 1-60 minutes and 1-6 requests. Existing session
-directories, legacy approvals, missing/partial ledgers and exhausted budgets are
-not reset or silently adopted. Source/binary changes or an expired window refuse
-startup. Prepare a deliberately new session path when you need a fresh session;
-do not edit stored hashes, limits or deadlines to revive an old one.
-
-If setup reports a missing input, set the named variable above. A private-key error
-means the file is missing, linked, inside the checkout or not owner-only. An
-existing-scope error means that path is already in use; historical state is kept
-unchanged. A partial/locked scope needs investigation, not an automatic retry.
-The offline tests do not need a key. Opening `web/index.html` alone does not start
-the backend, and historical recorded results are not imported into new sessions.
-
-Exports are append-only: each is saved under that session's
-`exports/<export-id>/regression.test.mjs` with its run, scenario and hash record.
-The app stages identical frozen test bytes at `evidence/regression.test.mjs` inside
-its disposable verification copies and runs `verify:export` there. A downloaded
-test is not a standalone checkout; use the UI's regression action for the paired
-red/green proof. A later session never overwrites a prior export or the legacy
-root artifact.
 
 ## Project Structure
 

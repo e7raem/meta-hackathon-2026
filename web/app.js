@@ -502,16 +502,35 @@ export function validateRegression(data, { fixture = false } = {}) {
     if (!green.ok) return green;
   }
   if (!isPlainObject(data.correction)) return fail("regression correction must be an object");
-  if (data.correction.kind !== "PRE_REVIEWED_FIXED") {
-    return fail("regression correction kind must be PRE_REVIEWED_FIXED");
-  }
+  const repair = data.correction.kind === "MUSE_PROPOSED";
+  if (!repair && data.correction.kind !== "PRE_REVIEWED_FIXED") return fail("unknown correction kind");
+  if (repair && (fixture || data.scenarioId !== "a")) return fail("Muse repair requires live scenario A");
   if (!textOk(data.correction.label, 300)) {
     return fail("regression correction label must be a bounded non-empty string");
   }
   for (const key of ["faultySha256", "correctedSha256"]) {
     const value = data.correction[key];
+    if (repair && key === "correctedSha256" && data.callsUsed === null && value === null) continue;
     if (typeof value !== "string" || !SHA256_PATTERN.test(value)) {
       return fail(`regression correction.${key} must be 64 lowercase hex characters`);
+    }
+  }
+  if (repair) {
+    if (data.callsUsed === null && (data.correction.correctedSha256 !== null || data.green !== null || data.baseline !== null)) {
+      return fail("an unrequested repair must not have patch evidence");
+    }
+    if (data.callsUsed !== null && (!Number.isInteger(data.callsUsed) || data.callsUsed < 1
+      || !["before", "after", "explanation"].every((key) => textOk(data.correction[key], 600)))) {
+      return fail("Muse repair requires a budget reservation and a bounded patch");
+    }
+    if (data.baseline !== null) {
+      const result = validateExecutionRecord(data.baseline, "repair baseline");
+      if (!result.ok) return result;
+    }
+    if (data.status === "RED_THEN_GREEN" && (data.callsUsed === null || data.baseline?.exitCode !== 0
+      || data.baseline.counts?.tests !== 6 || data.baseline.counts.passed !== 6
+      || data.baseline.counts.failed !== 0 || data.baseline.counts.skipped !== 0 || data.baseline.counts.cancelled !== 0)) {
+      return fail("Muse repair must pass all six baseline assertions");
     }
   }
   if (!isPlainObject(data.cleanup) || typeof data.cleanup.ownedCopiesRemoved !== "boolean") {
@@ -815,15 +834,18 @@ export function createApiClient({ fetchImpl, randomId }) {
       if (data.runId !== runId) throw apiError("invalid_shape", "export echoed a different runId");
       return data;
     },
-    async regression({ csrfToken, runId, exportId, scenarioId }) {
+    async regression({ csrfToken, runId, exportId, scenarioId, repair = false }) {
       const data = await requestJson(API_PATHS.regression, {
         method: "POST",
         csrfToken,
-        body: { runId, exportId },
+        body: { runId, exportId, ...(repair ? { repair: true } : {}) },
       });
       ensure(validateRegression(data, { fixture: sessionMode === "FIXTURE" }), data);
       if (data.runId !== runId || data.exportId !== exportId || data.scenarioId !== scenarioId) {
         throw apiError("invalid_shape", "regression echoed a different runId, exportId or scenarioId");
+      }
+      if (repair !== (data.correction.kind === "MUSE_PROPOSED")) {
+        throw apiError("invalid_shape", "the backend returned the wrong correction type");
       }
       return data;
     },
@@ -1348,13 +1370,18 @@ export function createStore({ client }) {
       }
     },
 
-    async runRegression() {
+    async runRegression(repair = false) {
       if (!state.exportResult) return { ok: false, reason: "not_exported" };
       const busy = guardBusy();
       if (busy) return busy;
       if (state.regression) return { ok: false, reason: "already_run" };
+      if (repair && (state.session.mode !== "LIVE" || state.selectedChangeId !== "a"
+        || !state.budgetKnown || state.session.callsUsed >= state.session.limit || state.errors.regression)) {
+        return { ok: false, reason: "repair_unavailable" };
+      }
       const epoch = state.epoch;
-      state.inFlight = "regression";
+      state.inFlight = repair ? "repair" : "regression";
+      if (repair) state.budgetKnown = false;
       state.errors.regression = null;
       notify();
       try {
@@ -1363,6 +1390,7 @@ export function createStore({ client }) {
           runId: rootComparison().runId,
           exportId: state.exportResult.exportId,
           scenarioId: state.exportResult.scenarioId,
+          repair,
         });
         if (state.epoch !== epoch) return { ok: false, reason: "stale" };
         assertFreshRecord(regression, "runId", rootComparison().runId);
@@ -1370,6 +1398,15 @@ export function createStore({ client }) {
           throw apiError("invalid_shape", "regression exportId differs from the retained export");
         }
         state.inFlight = null;
+        if (repair) {
+          if (regression.callsUsed !== null) {
+            if (regression.callsUsed !== state.session.callsUsed + 1 || regression.callsUsed > state.session.limit) {
+              throw apiError("invalid_shape", "repair did not confirm exactly one durable budget reservation");
+            }
+            state.session.callsUsed = regression.callsUsed;
+          }
+          state.budgetKnown = true;
+        }
         if (regression.status === "RED_THEN_GREEN") {
           const problem = checkRegressionEvidence(regression);
           if (problem) {
@@ -1773,6 +1810,7 @@ const PENDING_ACTIONS = {
   followup_control: ["Checking the follow-up control...", "Running the accepted follow-up baskets against the fixed correction.", "basket"],
   export: ["Keeping the regression test...", "Persisting the test on the local backend. Nothing is executed in this browser.", "test"],
   regression: ["Proving red, then green...", "Running identical exported test bytes against the faulty code and the pre-reviewed correction.", "test"],
+  repair: ["Testing a Muse repair...", "First prove the locked test fails. Then ask Muse for a patch and check it.", "test"],
 };
 
 const FIXTURE_ACTION_LABELS = {
@@ -1788,7 +1826,7 @@ export function getPendingPresentation(operation, slow = false, fixture = false)
   if (!action) return null;
   const [label, detail, step] = action;
   if (fixture) return { label: "Loading fixture...", detail: "Scripted preview only. No model calls or code execution.", step };
-  const model = operation === "propose" || operation === "feedback";
+  const model = operation === "propose" || operation === "feedback" || operation === "repair";
   return {
     label,
     detail: slow
@@ -1809,7 +1847,7 @@ export function getSessionUsageText(state) {
   if (state.session?.mode === "FIXTURE") {
     return `Fixture preview · ${state.session.callsUsed} of ${state.session.limit} scripted turns · no model calls; live budget unchanged`;
   }
-  if (state.inFlight === "propose" || state.inFlight === "feedback") {
+  if (state.inFlight === "propose" || state.inFlight === "feedback" || state.inFlight === "repair") {
     return "Muse is working; request usage updates when it finishes.";
   }
   if (state.inFlight === "usage") return "Refreshing request usage; no model call is made.";
@@ -1960,6 +1998,7 @@ function startBrowserApp() {
     exportStatus: byId("export-status"),
     exportPanel: byId("export-panel"),
     regressionButton: byId("regression-button"),
+    regressionHint: byId("regression-hint"),
     regressionStatus: byId("regression-status"),
     regressionPanel: byId("regression-panel"),
     retainedBanner: byId("retained-banner"),
@@ -2000,7 +2039,7 @@ function startBrowserApp() {
     [nodes.followupCompareButton, ["followup_compare"]],
     [nodes.followupControlButton, ["followup_control"]],
     [nodes.exportButton, ["export"]],
-    [nodes.regressionButton, ["regression"]],
+    [nodes.regressionButton, ["regression", "repair"]],
   ].map(([button, operations]) => ({ button, operations, idleLabel: button.textContent }));
   let activityKey = null;
   let patienceTimer = null;
@@ -2428,9 +2467,16 @@ function startBrowserApp() {
   }
 
   function renderRegression(state) {
+    const useMuse = state.session?.mode === "LIVE" && state.selectedChangeId === "a";
+    nodes.regressionHint.textContent = useMuse
+      ? "Prove the locked test fails, ask Muse for a patch, then run that same test and the original checks."
+      : "Keep the same test red on faulty code and green on the pre-reviewed correction.";
     nodes.regressionButton.disabled =
-      !state.exportResult || Boolean(state.inFlight) || Boolean(state.regression);
-    if (state.inFlight === "regression") {
+      !state.exportResult || Boolean(state.inFlight) || Boolean(state.regression)
+      || (useMuse && (!state.budgetKnown || state.session.callsUsed >= state.session.limit || Boolean(state.errors.regression)));
+    if (state.inFlight === "repair") {
+      setStatus(nodes.regressionStatus, "Proving the failure, requesting one Muse patch, and checking it. Nothing is applied to your repository.", "pending");
+    } else if (state.inFlight === "regression") {
       setStatus(nodes.regressionStatus,
         state.session?.mode === "FIXTURE" ? "Loading scripted red/green counts. No regression test is executed."
           : "Running the same exported test against the faulty source, then the pre-reviewed correction…", "pending");
@@ -2442,18 +2488,20 @@ function startBrowserApp() {
         setStatus(nodes.regressionStatus, "", "good");
         nodes.regressionStatus.append(
           el("strong", { class: "regression-verdict" }, state.regression.origin === "FIXTURE"
-            ? "Scripted example: red before, green after." : "Same test: fails before, passes after."),
+            ? "Scripted example: red before, green after."
+            : useMuse ? "Muse patch passed. Same test: red → green." : "Same test: fails before, passes after."),
           el("span", { class: "baseline-scope" },
             state.regression.origin === "FIXTURE" ? "Fixture outcomes only. No regression test or correction was executed."
-              : "RED then GREEN — the same test failed on the faulty source and passed on the pre-reviewed correction. "
-                + "This is the regression test to keep, not whole-project approval."),
+              : useMuse ? "The unchanged regression test and all six original assertions passed with the patch. Review it before merging."
+                : "The same test failed on the faulty source and passed on the pre-reviewed correction. Keep the test; this is not whole-project approval."),
         );
       } else {
         setStatus(nodes.regressionStatus,
           "INCONCLUSIVE — this run did not prove the regression red-to-green. It is not green proof.", "warn");
       }
     } else if (state.exportResult) {
-      setStatus(nodes.regressionStatus, "Not run yet.", null);
+      setStatus(nodes.regressionStatus, useMuse && state.budgetKnown && state.session.callsUsed >= state.session.limit
+        ? "No Muse requests remain in this session." : "Not run yet.", null);
     } else {
       setStatus(nodes.regressionStatus, "", null);
     }
@@ -2461,6 +2509,8 @@ function startBrowserApp() {
     if (!state.regression) return;
     const regression = state.regression;
     const sameHash = state.exportResult !== null && regression.testSha256 === state.exportResult.sha256;
+    const fault = useMuse && sameHash && regression.status === "RED_THEN_GREEN"
+      ? getFaultEvidence(state.comparison, state.accepted?.acceptedCases ?? [], state.baseline) : null;
     const limits = el("ul", { class: "limits" });
     for (const limit of regression.limits) limits.append(el("li", {}, limit));
     const rows = [
@@ -2478,8 +2528,9 @@ function startBrowserApp() {
       executionEvidence("Red run (faulty source)", regression.red),
     );
     if (regression.green !== null) {
-      evidence.append(executionEvidence("Green run (pre-reviewed correction)", regression.green));
+      evidence.append(executionEvidence(useMuse ? "Regression on proposed patch" : "Green run (pre-reviewed correction)", regression.green));
     }
+    if (regression.baseline) evidence.append(executionEvidence("Original checks on proposed patch", regression.baseline));
     evidence.append(
       el("dl", { class: "identities" },
         el("dt", {}, "test sha256"),
@@ -2487,11 +2538,13 @@ function startBrowserApp() {
         el("dt", {}, "faulty source sha256"),
         el("dd", { class: "mono" }, regression.correction.faultySha256),
         el("dt", {}, "corrected source sha256"),
-        el("dd", { class: "mono" }, regression.correction.correctedSha256),
+        el("dd", { class: "mono" }, regression.correction.correctedSha256 ?? "not staged"),
       ),
       limits,
     );
     nodes.regressionPanel.append(
+      ...(fault ? [el("p", { class: "baseline-score" },
+        `Charge on the failing basket: ${formatPence(fault.before)} → ${formatPence(fault.expected)} with the patch`)] : []),
       ...rows,
       el("p", {},
         sameHash
@@ -2499,10 +2552,20 @@ function startBrowserApp() {
           : "Warning: the test identity could not be matched to the exported test."),
       el("p", { class: "fineprint" },
         regression.origin === "FIXTURE" ? "Scripted correction only. No source copies were created or cleaned up."
-          : `Correction used: ${regression.correction.label} — a pre-reviewed prepared correction, not a Muse-generated fix. ` +
+          : `Correction used: ${regression.correction.label}. ` +
             `Owned copies cleaned up: ${regression.cleanup.ownedCopiesRemoved ? "yes" : "no"}.`),
-      evidence,
     );
+    if (useMuse && regression.correction.after) {
+      nodes.regressionPanel.append(
+        el("h3", {}, "Muse’s proposed patch"),
+        el("p", {}, regression.correction.explanation),
+        el("pre", {}, el("code", {}, [
+          ...regression.correction.before.trimEnd().split("\n").map((line) => "- " + line),
+          ...regression.correction.after.trimEnd().split("\n").map((line) => "+ " + line),
+        ].join("\n"))),
+      );
+    }
+    nodes.regressionPanel.append(evidence);
   }
 
   function renderRetained(state) {
@@ -2843,14 +2906,20 @@ function startBrowserApp() {
     for (const { button, operations, idleLabel } of actionButtons) {
       const usageButton = button === nodes.proposeButton || button === nodes.feedbackButton;
       const label = fixture ? FIXTURE_ACTION_LABELS[button.id] ?? idleLabel
-        : button === nodes.baselineButton ? getBaselineButtonPresentation(state).label : idleLabel;
+        : button === nodes.regressionButton && state.session?.mode === "LIVE" && state.selectedChangeId === "a"
+          ? "Ask Muse to fix it (1 request)"
+          : button === nodes.baselineButton ? getBaselineButtonPresentation(state).label : idleLabel;
       presentPendingButton(button, operations.includes(state.inFlight) ? pending : null,
         usageButton && !state.budgetKnown ? fixture ? "Refresh fixture state" : "Refresh usage (no model call)" : label);
       button.dataset.nextAction = "false";
     }
     const needsReview = (state.proposal?.cases.length && !state.accepted)
       || (state.followUp?.proposal.cases.length && !state.followUp.accepted);
-    const next = actionButtons.find(({ button }) => !button.disabled && !button.closest("[hidden]"))?.button;
+    const available = (button) => !button.disabled && !button.closest("[hidden]");
+    const onRepairPath = state.session?.mode === "LIVE" && state.selectedChangeId === "a"
+      && state.comparison?.status === "REPRODUCED";
+    const next = onRepairPath && [nodes.exportButton, nodes.regressionButton].find(available)
+      || actionButtons.find(({ button }) => available(button))?.button;
     const error = Object.values(state.errors).find(Boolean);
     let step = pending?.step ?? (needsReview ? "basket" : "change");
     nodes.activity.dataset.pending = pending ? "true" : "false";
@@ -2909,7 +2978,8 @@ function startBrowserApp() {
     store.exportTest();
   });
   nodes.regressionButton.addEventListener("click", () => {
-    store.runRegression();
+    const state = store.getState();
+    store.runRegression(state.session?.mode === "LIVE" && state.selectedChangeId === "a");
   });
   nodes.controlButton.addEventListener("click", () => {
     store.runControl();

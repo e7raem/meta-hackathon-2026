@@ -5,7 +5,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { join, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RUNTIME_FILES, MAX_RUNTIME_SOURCE_BYTES, createLifecycle, createPricingVerification,
-  runDeclaredVerification, parseTaskExecution, exportRegression, persistRegression, fixedRunner } from "../tools/live-demo.mjs";
+  runDeclaredVerification, parseTaskExecution, exportRegression, persistRegression, fixedRunner,
+  repairFromResponse } from "../tools/live-demo.mjs";
 
 // Authored offline integration fixtures, never new Muse or customer evidence.
 const SOURCE = fileURLToPath(new URL("..", import.meta.url));
@@ -128,6 +129,50 @@ test("actual nested declared Ota tasks prove baseline and identical-test red-gre
   });
 });
 
+test("an authored Muse-shaped proposal is tested only after red and must pass the locked test and original checks", async () => {
+  const otaExecutable = process.env.OTA_DEMO_TEST_OTA;
+  assert.ok(isAbsolute(otaExecutable ?? ""));
+  assert.equal(sha(await readFile(otaExecutable)), process.env.OTA_DEMO_TEST_OTA_SHA256);
+  await owned(async (input) => {
+    const lifecycle = createLifecycle(), calls = [];
+    const verification = createPricingVerification({ ...input, lifecycle, execute: async (task, cwd) => {
+      const result = await runDeclaredVerification({ task, cwd, nodeExecutable: process.execPath, otaExecutable, lifecycle });
+      calls.push([task, result.counts]); return result;
+    } });
+    const candidate = await readFile(join(input.root, "pricing/change-a.ts"), "utf8");
+    const value = { testSha256: input.testSha256, eligibleTotal: "eligibleSubtotal * 9 / 10",
+      voucherBasis: "eligibleTotal", cartTotal: "eligibleTotal + ineligibleTotal - voucher",
+      explanation: "Apply the voucher after discount." };
+    const raw = (output) => ({ status: "completed", model: "muse-spark-1.3",
+      output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify(output) }] }] });
+    assert.throws(() => repairFromResponse(raw({ ...value, cartTotal: "process.exit(0)" }), candidate, input.testSha256),
+      /MODEL_REPAIR_INVALID_CONSUMED/);
+    assert.throws(() => repairFromResponse(raw({ ...value, testSha256: "0".repeat(64) }), candidate, input.testSha256),
+      /MODEL_REPAIR_INVALID_CONSUMED/);
+    const proof = await verification.regression({ ...input, expectedTests: 2, expectedFailures: 2, proposeRepair: async () => {
+      assert.deepEqual(calls.map(([task]) => task), ["verify:export"]);
+      assert.equal(calls[0][1].failed, 2);
+      return repairFromResponse(raw(value), candidate, input.testSha256);
+    } });
+    assert.deepEqual(calls.map(([task]) => task), ["verify:export", "verify:export", "verify:baseline"]);
+    assert.equal(proof.status, "RED_THEN_GREEN");
+    assert.equal(proof.testSha256, input.testSha256);
+    assert.equal(proof.sameTest, true);
+    assert.equal(proof.green.counts.passed, 2);
+    assert.equal(proof.baseline.counts.passed, 6);
+    assert.equal(proof.correction.kind, "MUSE_PROPOSED");
+    assert.notEqual(proof.correction.correctedSha256, input.sourceHashes["pricing/change-b.ts"]);
+    assert.match(proof.correction.after, /eligibleTotal >= 10000/);
+    calls.length = 0;
+    const bad = await verification.regression({ ...input, expectedTests: 2, expectedFailures: 2, proposeRepair: async () =>
+      repairFromResponse(raw({ ...value, voucherBasis: "eligibleSubtotal" }), candidate, input.testSha256) });
+    assert.deepEqual(calls.map(([task]) => task), ["verify:export", "verify:export"]);
+    assert.equal(bad.status, "INCONCLUSIVE");
+    assert.equal(bad.green.counts.failed, 1);
+    assert.equal(bad.baseline, null);
+  });
+});
+
 test("actual selected C baseline and identical three-case test distinguish C from correct B", async () => {
   const otaExecutable = process.env.OTA_DEMO_TEST_OTA;
   assert.ok(isAbsolute(otaExecutable ?? ""));
@@ -167,7 +212,8 @@ test("setup failures, skipped checks and interrupted exits cannot establish red-
       let calls = 0;
       const verification = createPricingVerification({ ...input, lifecycle: createLifecycle(),
         execute: async () => { calls++; return parseTaskExecution(result); } });
-      const proof = await verification.regression({ ...input, expectedTests: 2, expectedFailures: 2 });
+      const proof = await verification.regression({ ...input, expectedTests: 2, expectedFailures: 2,
+        proposeRepair: async () => assert.fail("an unproved red must not reach the provider") });
       assert.equal(proof.status, "INCONCLUSIVE"); assert.equal(proof.green, null);
       assert.equal(calls, 1, "a setup/partial red does not proceed to green");
     });
